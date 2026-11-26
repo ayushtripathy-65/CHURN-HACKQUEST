@@ -428,8 +428,10 @@ ORDER BY churn_rate_pct DESC;"""
 
     query_input = st.text_area("SQL Query Editor:", default_query, height=140)
     if st.button("Run Cohort Query", type="primary"):
-        res = explorer.run_query(query_input)
-        if isinstance(res, pd.DataFrame):
+        res = explorer.query(query_input)
+        if isinstance(res, pd.DataFrame) and "Error" in res.columns:
+            st.error(f"SQL Execution Error: {res['Error'].iloc[0]}")
+        elif isinstance(res, pd.DataFrame):
             st.success(f"Query returned {len(res)} cohort groupings.")
             st.dataframe(res, use_container_width=True)
         else:

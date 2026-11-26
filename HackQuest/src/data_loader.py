@@ -105,6 +105,10 @@ class SQLiteCohortExplorer:
         except Exception as e:
             return pd.DataFrame({"Error": [str(e)]})
 
+    def run_query(self, sql_query: str) -> pd.DataFrame:
+        """Alias for query."""
+        return self.query(sql_query)
+
     def get_preset_queries(self) -> dict:
         """Returns standard cohort analysis queries matching Slide 5."""
         return {
