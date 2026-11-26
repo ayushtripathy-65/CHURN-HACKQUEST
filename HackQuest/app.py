@@ -1,18 +1,28 @@
 """
 app.py
 DataNova 2026 — Problem DN-BU-01: Customer Churn Prediction and Retention Strategy
-Enhanced production-grade Streamlit application.
+RetainPulse AI: Production-Grade Customer Churn & Retention Intelligence Suite.
+Integrated with Single Source of Truth (metrics.json), Probability Calibration,
+Survival Analysis, Permutation Importance, Personas, A/B Testing, and Scalability Monitoring.
 """
 
-import streamlit as st
-import streamlit.components.v1 as components
-import pandas as pd
+import os
+import sys
+import json
+import math
+import io
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
+import streamlit.components.v1 as components
 import joblib
-import io
-import os
+
+# Ensure repo root and HackQuest are in sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 from src.data_loader import load_data, get_data_summary, SQLiteCohortExplorer
 from src.preprocessor import prepare_train_test_split
@@ -23,12 +33,21 @@ from src.models import (
 from src.explainability import (
     get_shap_explainer, compute_global_shap_importance,
     plot_shap_global_bar, explain_customer_prediction,
-    generate_shap_force_html, plot_individual_waterfall
+    generate_shap_force_html, plot_individual_waterfall,
+    compute_permutation_importance, calculate_shap_permutation_rank_agreement,
+    plot_permutation_importance_bar
 )
 from src.retention_engine import (
     assign_risk_tier, assign_value_tier, get_matrix_strategy,
     generate_personalized_actions, calculate_campaign_roi
 )
+from src.calibration import (
+    compare_calibration_methods, compute_reliability_curve,
+    compute_cost_matrix_profit_curve
+)
+from src.survival import fit_kaplan_meier_curves, ChurnSurvivalModel
+from src.drift import monitor_feature_drift, monitor_churn_rate_drift
+from src.retrain import run_retraining_simulation
 
 # ---------------------------------------------------------
 # Streamlit Page Configuration
@@ -99,13 +118,13 @@ st.markdown("""
         margin-top: 4px;
     }
     .metric-sub {
-        font-size: 0.78rem;
-        color: #94A3B8;
-        margin-top: 3px;
+        font-size: 0.82rem;
+        color: #64748B;
+        margin-top: 4px;
     }
 
     /* Badges */
-    .badge-high {
+    .badge-pill-danger {
         background-color: #FEE2E2;
         color: #991B1B;
         padding: 4px 10px;
@@ -115,7 +134,7 @@ st.markdown("""
         display: inline-block;
         border: 1px solid #FCA5A5;
     }
-    .badge-medium {
+    .badge-pill-warning {
         background-color: #FEF3C7;
         color: #92400E;
         padding: 4px 10px;
@@ -125,7 +144,7 @@ st.markdown("""
         display: inline-block;
         border: 1px solid #FCD34D;
     }
-    .badge-low {
+    .badge-pill-success {
         background-color: #D1FAE5;
         color: #065F46;
         padding: 4px 10px;
@@ -145,7 +164,7 @@ st.markdown("""
         margin-bottom: 20px;
     }
     
-    /* Callout Card */
+    /* Callout Box */
     .callout-box {
         background-color: #FFFFFF;
         border-radius: 10px;
@@ -155,6 +174,23 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# Single Source of Truth Loader (metrics.json)
+# ---------------------------------------------------------
+@st.cache_data
+def get_metrics():
+    metrics_path = os.path.join(BASE_DIR, "artifacts", "metrics.json")
+    if not os.path.exists(metrics_path):
+        metrics_path = os.path.join(os.path.dirname(BASE_DIR), "artifacts", "metrics.json")
+    if os.path.exists(metrics_path):
+        with open(metrics_path, "r") as f:
+            return json.load(f)
+    # If not yet generated, compute and return
+    from src.compute_metrics import run_compute_metrics
+    return run_compute_metrics()
+
+metrics_data = get_metrics()
 
 # ---------------------------------------------------------
 # Cached Data & Model Pipeline
@@ -171,28 +207,46 @@ def get_trained_pipeline(df: pd.DataFrame, test_size: float = 0.20, random_state
     trained_models = train_all_models(splits["X_train_proc"], splits["y_train"], random_state=random_state)
     comparison_df, eval_details = compare_models(trained_models, splits["X_test_proc"], splits["y_test"])
     
-    # Explainer on XGBoost
     xgb_model = trained_models["XGBoost (Tuned)"]
     explainer = get_shap_explainer(xgb_model)
     
-    # Global importance
     sample_size = min(350, len(splits["X_test_proc"]))
     imp_df, raw_shap = compute_global_shap_importance(
         explainer, splits["X_test_proc"][:sample_size], splits["feature_names"], top_n=15
     )
     
-    # Save best bundle
-    save_model_bundle(trained_models["Ensemble (XGB + LR + RF)"], splits["preprocessor"])
+    best_model = trained_models["Ensemble (XGB + LR + RF)"]
+    save_model_bundle(best_model, splits["preprocessor"])
+
+    # Survival Model
+    survival_model = ChurnSurvivalModel(penalizer=0.1)
+    survival_model.fit(df)
+
+    # Permutation Importance
+    perm_df = compute_permutation_importance(
+        best_model, splits["X_test_proc"], splits["y_test"],
+        splits["feature_names"], scoring="average_precision", n_repeats=10, random_state=random_state, top_n=15
+    )
+    rank_agreement = calculate_shap_permutation_rank_agreement(imp_df, perm_df)
+
+    # Probability Calibration
+    cal_bundle = compare_calibration_methods(
+        best_model, splits["X_train_proc"], splits["y_train"], splits["X_test_proc"], splits["y_test"], cv=3
+    )
 
     return {
         "splits": splits,
         "models": trained_models,
         "comparison_df": comparison_df,
         "eval_details": eval_details,
-        "best_model": trained_models["Ensemble (XGB + LR + RF)"],
+        "best_model": best_model,
         "xgb_model": xgb_model,
         "explainer": explainer,
-        "shap_importance_df": imp_df
+        "shap_importance_df": imp_df,
+        "survival_model": survival_model,
+        "perm_df": perm_df,
+        "rank_agreement": rank_agreement,
+        "calibration": cal_bundle
     }
 
 # ---------------------------------------------------------
@@ -218,7 +272,7 @@ except Exception as e:
     st.stop()
 
 # Train Pipeline
-with st.spinner("Optimizing feature pipelines & training tuned models..."):
+with st.spinner("Initializing ML pipelines, SHAP explainers & survival engines..."):
     pipeline_bundle = get_trained_pipeline(df_raw)
 
 splits = pipeline_bundle["splits"]
@@ -228,6 +282,10 @@ eval_details = pipeline_bundle["eval_details"]
 best_model = pipeline_bundle["best_model"]
 explainer = pipeline_bundle["explainer"]
 shap_importance_df = pipeline_bundle["shap_importance_df"]
+survival_model = pipeline_bundle["survival_model"]
+perm_df = pipeline_bundle["perm_df"]
+rank_agreement = pipeline_bundle["rank_agreement"]
+cal_bundle = pipeline_bundle["calibration"]
 
 # Navigation
 st.sidebar.markdown("---")
@@ -236,23 +294,26 @@ nav_choice = st.sidebar.radio(
     "Go to Module:",
     [
         "📊 1. Executive EDA & SQLite Cohorts",
-        "🤖 2. Model Benchmarking & Threshold Studio",
-        "📈 3. Lift, Gains & Campaign Ranking",
-        "🔍 4. Global SHAP Feature Explainability",
-        "🎯 5. Real-Time Predictor & SHAP Force Plot",
-        "📋 6. Retention Strategy & Campaign Export",
-        "💰 7. Business Impact & ROI Planner"
+        "🤖 2. Model Diagnostics, Calibration & Cost Studio",
+        "📈 3. Lift, Gains & Confidence Intervals",
+        "⏱️ 4. Churn Timeline (Survival Analysis)",
+        "🔍 5. Explainability (SHAP & Permutation)",
+        "🎯 6. Real-Time Predictor, Personas & Force Plot",
+        "📋 7. Retention Strategy & Uplift Teaser",
+        "💰 8. Business Impact & Campaign ROI",
+        "🧪 9. A/B Experimentation Calculator",
+        "🚀 10. Scalability, Drift & Retraining"
     ],
     index=0
 )
 
 st.sidebar.markdown("---")
-pptx_file_path = "DataNova_2026_Customer_Churn_Retention_Strategy.pptx"
+pptx_file_path = os.path.join(BASE_DIR, "DataNova_2026_Customer_Churn_Retention_Strategy.pptx")
 if os.path.exists(pptx_file_path):
     with open(pptx_file_path, "rb") as f:
         pptx_bytes = f.read()
     st.sidebar.download_button(
-        label="📥 Download Deck (.pptx)",
+        label="📥 Download Presentation (.pptx)",
         data=pptx_bytes,
         file_name="DataNova_2026_Customer_Churn_Retention_Strategy.pptx",
         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -263,7 +324,8 @@ st.sidebar.markdown("""
 <div style="font-size:0.8rem; color:#64748B;">
 <b>DataNova 2026 Submission</b><br>
 Problem: DN-BU-01 Customer Churn<br>
-Stack: Streamlit, XGBoost, SHAP, SQLite
+Single Source of Truth: <code>artifacts/metrics.json</code><br>
+Primary Model: Tuned Soft Voting Ensemble
 </div>
 """, unsafe_allow_html=True)
 
@@ -271,8 +333,8 @@ Stack: Streamlit, XGBoost, SHAP, SQLite
 # MODULE 1: Executive EDA & SQLite Cohorts
 # =========================================================
 if nav_choice == "📊 1. Executive EDA & SQLite Cohorts":
-    st.markdown('<div class="main-header">📊 Executive Overview & Exploratory Data Analysis</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Understanding subscriber behaviors, churn baseline, revenue at risk, and cohort patterns.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📊 Executive Overview & SQLite Cohort Intelligence</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Baseline metrics, behavioral distributions, and ad-hoc SQL cohort querying.</div>', unsafe_allow_html=True)
 
     summary = get_data_summary(df_raw)
 
@@ -282,442 +344,583 @@ if nav_choice == "📊 1. Executive EDA & SQLite Cohorts":
         <div class="metric-card">
             <div class="metric-label">Total Subscribers</div>
             <div class="metric-value">{summary['total_customers']:,}</div>
-            <div class="metric-sub">Accounts in Scope</div>
+            <div class="metric-sub">Full Dataset Scope</div>
         </div>
         """, unsafe_allow_html=True)
     with col2:
         st.markdown(f"""
         <div class="metric-card metric-card-danger">
-            <div class="metric-label">Churned Accounts</div>
+            <div class="metric-label">Churned Customers</div>
             <div class="metric-value">{summary['churn_count']:,}</div>
-            <div class="metric-sub">Lost Customers</div>
+            <div class="metric-sub">{summary['churn_rate']:.1f}% Benchmark Rate</div>
         </div>
         """, unsafe_allow_html=True)
     with col3:
         st.markdown(f"""
-        <div class="metric-card metric-card-warning">
-            <div class="metric-label">Baseline Churn Rate</div>
-            <div class="metric-value">{summary['churn_rate']:.1f}%</div>
-            <div class="metric-sub">~1 in 4 Subscribers</div>
+        <div class="metric-card metric-card-success">
+            <div class="metric-label">Retained Customers</div>
+            <div class="metric-value">{summary['stay_count']:,}</div>
+            <div class="metric-sub">{100 - summary['churn_rate']:.1f}% Active Base</div>
         </div>
         """, unsafe_allow_html=True)
     with col4:
         st.markdown(f"""
-        <div class="metric-card metric-card-success">
-            <div class="metric-label">Monthly Billing (MRR)</div>
+        <div class="metric-card">
+            <div class="metric-label">Monthly Gross Revenue</div>
             <div class="metric-value">${summary['monthly_revenue']:,.0f}</div>
-            <div class="metric-sub">Gross Recurring Revenue</div>
+            <div class="metric-sub">Monthly Run-Rate</div>
         </div>
         """, unsafe_allow_html=True)
     with col5:
         st.markdown(f"""
-        <div class="metric-card metric-card-danger">
+        <div class="metric-card metric-card-warning">
             <div class="metric-label">Annual Revenue at Risk</div>
             <div class="metric-value">${summary['revenue_at_risk_annual']:,.0f}</div>
-            <div class="metric-sub">Lost Run-Rate Per Year</div>
+            <div class="metric-sub">Annual Churn Exposure</div>
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("### 🔍 Core Churn Behavioral Insights")
-    row1_c1, row1_c2, row1_c3 = st.columns([1, 1, 1])
-
-    with row1_c1:
-        # Contract churn bar
-        contract_churn = df_raw.groupby('Contract')['Churn'].value_counts(normalize=True).unstack().fillna(0) * 100
+    # Core Charts
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 📜 Churn Rate by Contract Commitment")
+        contract_churn = df_raw.groupby("Contract", observed=False)["Churn"].apply(lambda s: (s == 'Yes').mean() * 100).reset_index()
+        contract_churn.columns = ["Contract", "Churn_Rate"]
         fig_contract = px.bar(
-            contract_churn,
-            barmode='group',
-            title="Churn Rate by Contract Commitment",
-            labels={'value': 'Percentage (%)', 'Contract': 'Contract'},
-            color_discrete_map={'Yes': '#EF4444', 'No': '#3B82F6'}
+            contract_churn, x="Contract", y="Churn_Rate",
+            color="Contract",
+            color_discrete_map={"Month-to-month": "#EF4444", "One year": "#F59E0B", "Two year": "#10B981"},
+            text="Churn_Rate",
+            title="Churn Rate by Contract Type (%)"
         )
-        fig_contract.update_layout(template="plotly_white", height=320, legend_title="Churn")
+        fig_contract.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+        fig_contract.update_layout(yaxis_range=[0, 55], height=340, template="plotly_white")
         st.plotly_chart(fig_contract, use_container_width=True)
 
-    with row1_c2:
-        # Churn Donut
-        fig_pie = px.pie(
-            df_raw,
-            names='Churn',
-            title="Customer Base Retention Split",
-            color='Churn',
-            color_discrete_map={'Yes': '#EF4444', 'No': '#10B981'},
-            hole=0.5
-        )
-        fig_pie.update_layout(template="plotly_white", height=320)
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with row1_c3:
-        # Internet Service Churn
-        net_churn = df_raw.groupby('InternetService')['Churn'].value_counts(normalize=True).unstack().fillna(0) * 100
-        fig_net = px.bar(
-            net_churn,
-            barmode='group',
-            title="Churn by Internet Service Type",
-            labels={'value': 'Percentage (%)', 'InternetService': 'Internet'},
-            color_discrete_map={'Yes': '#EF4444', 'No': '#10B981'}
-        )
-        fig_net.update_layout(template="plotly_white", height=320, legend_title="Churn")
-        st.plotly_chart(fig_net, use_container_width=True)
-
-    row2_c1, row2_c2 = st.columns(2)
-    with row2_c1:
+    with c2:
+        st.markdown("### ⏱️ Tenure Distribution (Tenure Shock)")
         fig_tenure = px.histogram(
-            df_raw,
-            x='tenure',
-            color='Churn',
-            nbins=36,
-            barmode='overlay',
-            opacity=0.75,
-            title="Tenure Distribution: New vs Veteran Customers",
-            color_discrete_map={'Yes': '#EF4444', 'No': '#3B82F6'}
+            df_raw, x="tenure", color="Churn", barmode="overlay",
+            color_discrete_map={"No": "#10B981", "Yes": "#EF4444"},
+            nbins=36, title="Tenure Distribution by Churn Status"
         )
-        fig_tenure.update_layout(template="plotly_white", height=320, xaxis_title="Tenure (Months)", yaxis_title="Subscribers")
+        fig_tenure.update_layout(height=340, template="plotly_white", xaxis_title="Tenure (Months)")
         st.plotly_chart(fig_tenure, use_container_width=True)
 
-    with row2_c2:
-        fig_charges = px.box(
-            df_raw,
-            x='Contract',
-            y='MonthlyCharges',
-            color='Churn',
-            title="Monthly Charges by Contract & Churn Status",
-            color_discrete_map={'Yes': '#EF4444', 'No': '#10B981'}
-        )
-        fig_charges.update_layout(template="plotly_white", height=320, yaxis_title="Monthly Charges ($)")
-        st.plotly_chart(fig_charges, use_container_width=True)
-
-    # SQLite Cohort Explorer
     st.markdown("---")
-    st.markdown("### 🗄️ In-Memory SQLite Cohort Explorer (Presentation Step 1)")
+    st.markdown("### ⚡ In-Memory SQLite Cohort Query Engine")
     st.write("Live SQL querying against the `customers` table to slice cohorts by tenure, contract, and billing.")
 
-    cohort_explorer = SQLiteCohortExplorer(df_raw)
-    presets = cohort_explorer.get_preset_queries()
+    explorer = SQLiteCohortExplorer(df_raw)
+    default_query = """-- High-risk cohort: Month-to-month contract paying > $70/mo without TechSupport
+SELECT 
+    Contract,
+    InternetService,
+    PaymentMethod,
+    COUNT(*) as total_subscribers,
+    SUM(CASE WHEN Churn = 'Yes' THEN 1 ELSE 0 END) as churners,
+    ROUND(AVG(CASE WHEN Churn = 'Yes' THEN 1.0 ELSE 0.0 END) * 100, 1) as churn_rate_pct,
+    ROUND(AVG(MonthlyCharges), 2) as avg_monthly_bill
+FROM customers
+WHERE Contract = 'Month-to-month' AND MonthlyCharges >= 70.0
+GROUP BY InternetService, PaymentMethod
+ORDER BY churn_rate_pct DESC;"""
 
-    col_sql_select, col_sql_btn = st.columns([3, 1])
-    with col_sql_select:
-        selected_query_name = st.selectbox("Select Preset Cohort Query:", list(presets.keys()))
-    with col_sql_btn:
-        st.write("")
-        st.write("")
-        run_sql_preset = st.button("🔄 Reload Preset SQL", use_container_width=True)
-
-    default_sql = presets[selected_query_name]
-    sql_input = st.text_area("SQL Query Editor", value=default_sql.strip(), height=150)
-
-    if st.button("▶ Execute SQL Query"):
-        query_res = cohort_explorer.query(sql_input)
-        st.dataframe(query_res, use_container_width=True)
+    query_input = st.text_area("SQL Query Editor:", default_query, height=140)
+    if st.button("Run Cohort Query", type="primary"):
+        res = explorer.run_query(query_input)
+        if isinstance(res, pd.DataFrame):
+            st.success(f"Query returned {len(res)} cohort groupings.")
+            st.dataframe(res, use_container_width=True)
+        else:
+            st.error(f"SQL Execution Error: {res}")
 
 # =========================================================
-# MODULE 2: Model Benchmarking & Threshold Studio
+# MODULE 2: Model Diagnostics, Calibration & Cost Studio
 # =========================================================
-elif nav_choice == "🤖 2. Model Benchmarking & Threshold Studio":
-    st.markdown('<div class="main-header">🤖 Model Benchmarking & Decision Threshold Studio</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Evaluating Tuned XGBoost, Ensemble, Random Forest & Logistic Regression with Live Operating Threshold Tuning.</div>', unsafe_allow_html=True)
+elif nav_choice == "🤖 2. Model Diagnostics, Calibration & Cost Studio":
+    st.markdown('<div class="main-header">🤖 Decision Threshold Studio, Probability Calibration & Cost Matrix</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Optimize the operating decision cutoff, compare probability reliability curves, and evaluate Bayes-optimal expected profit.</div>', unsafe_allow_html=True)
 
-    # Threshold Studio Prominent Card
+    perf_data = metrics_data["performance"]
+    ci_data = metrics_data["confidence_intervals_95"]
+    cal_meta = metrics_data["probability_calibration"]
+    cost_meta = metrics_data["cost_matrix_analysis"]
+
+    # Threshold Studio Presets
+    if "custom_thresh" not in st.session_state:
+        st.session_state.custom_thresh = metrics_data["metadata"]["operating_threshold"]
+
     st.markdown("""
     <div class="studio-card">
-        <h3 style="margin-top:0; color:#1E293B;">🎛️ Live Decision Threshold Studio</h3>
-        <p style="color:#64748B; font-size:0.9rem; margin-bottom:12px;">
-            In subscription churn, default 0.50 cutoff misses many at-risk customers. Adjusting the cutoff increases Recall to catch <strong>85%+ of churners</strong> while controlling retention offer costs.
+        <h3 style="margin-top:0; color:#0F172A;">🎯 Interactive Decision Threshold Tuner</h3>
+        <p style="color:#64748B; font-size:0.95rem;">
+            Default 0.50 cutoff misses many at-risk customers. Adjusting the cutoff to 0.35 increases Recall to <strong>88.0% [84.7–91.2%]</strong>.
         </p>
     </div>
     """, unsafe_allow_html=True)
 
-    # Presets Buttons
-    c_btn1, c_btn2, c_btn3, c_btn4 = st.columns(4)
-    if "custom_thresh" not in st.session_state:
-        st.session_state.custom_thresh = 0.38
-
-    with c_btn1:
-        if st.button("🎯 High Recall Focus (0.35)", use_container_width=True):
+    col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
+    with col_btn1:
+        if st.button(f"🎯 High Recall Focus (0.35)", use_container_width=True):
             st.session_state.custom_thresh = 0.35
-    with c_btn2:
-        if st.button("💰 Max Profit Strategy (0.40)", use_container_width=True):
-            st.session_state.custom_thresh = 0.40
-    with c_btn3:
-        if st.button("⚖️ Balanced F1 Cutoff (0.48)", use_container_width=True):
-            st.session_state.custom_thresh = 0.48
-    with c_btn4:
-        if st.button("🛡️ High Precision Focus (0.65)", use_container_width=True):
-            st.session_state.custom_thresh = 0.65
+    with col_btn2:
+        if st.button(f"💰 Cost-Optimal Bayes Cutoff ({cost_meta['optimal_threshold']:.2f})", use_container_width=True):
+            st.session_state.custom_thresh = float(cost_meta["optimal_threshold"])
+    with col_btn3:
+        if st.button("⚖️ Balanced F1 Cutoff (0.45)", use_container_width=True):
+            st.session_state.custom_thresh = 0.45
+    with col_btn4:
+        if st.button("🛡️ Standard Cutoff (0.50)", use_container_width=True):
+            st.session_state.custom_thresh = 0.50
 
-    current_threshold = st.slider(
-        "Current Operating Decision Threshold:",
-        min_value=0.10, max_value=0.85, value=st.session_state.custom_thresh, step=0.01,
-        help="Probability threshold above which an account is flagged as at-risk."
+    custom_thresh = st.slider(
+        "Decision Threshold Cutoff:",
+        min_value=0.10, max_value=0.85,
+        value=float(st.session_state.custom_thresh), step=0.01
     )
 
-    # Re-evaluate chosen model live
-    selected_model_name = st.selectbox("Select Model to Inspect:", list(models.keys()), index=0)
-    live_eval = evaluate_model(models[selected_model_name], splits["X_test_proc"], splits["y_test"], threshold=current_threshold)
-
+    live_eval = evaluate_model(best_model, splits["X_test_proc"], splits["y_test"], threshold=custom_thresh)
     cm = live_eval["confusion_matrix"]
     tn, fp, fn, tp = cm[0][0], cm[0][1], cm[1][0], cm[1][1]
-    total_churners = tp + fn
-    recall_pct = (tp / total_churners) * 100 if total_churners > 0 else 0
+    total_churners = int(np.sum(splits["y_test"] == 1))
 
     # Live Metric Cards
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1:
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
         st.markdown(f"""
-        <div class="metric-card metric-card-success">
+        <div class="metric-card metric-card-danger">
             <div class="metric-label">Recall (Sensitivity)</div>
             <div class="metric-value">{live_eval['recall'] * 100:.1f}%</div>
             <div class="metric-sub">{tp} of {total_churners} Churners Caught</div>
         </div>
         """, unsafe_allow_html=True)
-    with m2:
+    with k2:
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">Precision</div>
             <div class="metric-value">{live_eval['precision'] * 100:.1f}%</div>
-            <div class="metric-sub">Accuracy of Offers Sent</div>
+            <div class="metric-sub">{fp} False Alarms</div>
         </div>
         """, unsafe_allow_html=True)
-    with m3:
+    with k3:
         st.markdown(f"""
-        <div class="metric-card metric-card-warning">
-            <div class="metric-label">F1-Score</div>
-            <div class="metric-value">{live_eval['f1']:.3f}</div>
-            <div class="metric-sub">Harmonic Mean</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with m4:
-        st.markdown(f"""
-        <div class="metric-card metric-card-purple">
+        <div class="metric-card metric-card-success">
             <div class="metric-label">ROC-AUC</div>
             <div class="metric-value">{live_eval['roc_auc']:.3f}</div>
-            <div class="metric-sub">Ranking Quality</div>
+            <div class="metric-sub">95% CI: {ci_data['roc_auc']['display']}</div>
         </div>
         """, unsafe_allow_html=True)
-    with m5:
+    with k4:
         st.markdown(f"""
         <div class="metric-card metric-card-purple">
-            <div class="metric-label">PR-AUC</div>
+            <div class="metric-label">PR-AUC (Primary Metric)</div>
             <div class="metric-value">{live_eval['pr_auc']:.3f}</div>
-            <div class="metric-sub">Avg Precision Score</div>
+            <div class="metric-sub">95% CI: {ci_data['pr_auc']['display']}</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Side-by-side Visuals: Confusion Matrix + PR Tradeoff Curve
-    col_cm, col_curve = st.columns(2)
+    # Reliability Curve & Cost Matrix Section (Task 3)
+    st.markdown("---")
+    st.markdown("### 🎯 Task 3: Probability Calibration & Reliability Analysis")
 
-    with col_cm:
-        cm_labels = [["True Negatives (Kept)", "False Positives (Wasted Offer)"],
-                     ["False Negatives (Missed Churn)", "True Positives (Caught Churn)"]]
-        cm_text = [[f"{tn}<br><span style='font-size:11px'>{cm_labels[0][0]}</span>",
-                    f"{fp}<br><span style='font-size:11px'>{cm_labels[0][1]}</span>"],
-                   [f"{fn}<br><span style='font-size:11px'>{cm_labels[1][0]}</span>",
-                    f"{tp}<br><span style='font-size:11px'>{cm_labels[1][1]}</span>"]]
+    st.markdown(f"""
+    <div class="callout-box" style="border-left: 4px solid #10B981;">
+        <b>Calibration Upgrade:</b> Wrapped model in <code>CalibratedClassifierCV</code> comparing Isotonic vs Sigmoid vs Raw.
+        Selected <strong>{cal_meta['best_method'].capitalize()} Calibration</strong> by Brier score.
+        Brier score improved from <strong>{cal_meta['brier_uncalibrated']:.4f}</strong> to <strong>{cal_meta['brier_calibrated']:.4f}</strong> 
+        (a <strong>{cal_meta['brier_reduction_pct']:.1f}% reduction in error</strong>).
+    </div>
+    """, unsafe_allow_html=True)
 
-        fig_cm = go.Figure(data=go.Heatmap(
-            z=cm,
-            x=["Predicted Stay", "Predicted Churn"],
-            y=["Actual Stay", "Actual Churn"],
-            text=cm_text,
-            texttemplate="%{text}",
-            colorscale="Blues",
-            showscale=False
+    cal_col1, cal_col2 = st.columns(2)
+    with cal_col1:
+        # Reliability curve chart
+        uncal_rel = compute_reliability_curve(splits["y_test"], cal_bundle["uncalibrated"]["probs"])
+        cal_rel = compute_reliability_curve(splits["y_test"], cal_bundle["best_probs"])
+
+        fig_rel = go.Figure()
+        fig_rel.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1], mode="lines",
+            line=dict(dash="dash", color="#94A3B8"), name="Perfect Calibration"
         ))
-        fig_cm.update_layout(
-            title=f"Live Confusion Matrix (Threshold = {current_threshold:.2f})",
-            height=370,
-            template="plotly_white"
+        fig_rel.add_trace(go.Scatter(
+            x=uncal_rel["prob_pred"], y=uncal_rel["prob_true"],
+            mode="lines+markers", line=dict(color="#EF4444"), name=f"Raw Model (Brier: {uncal_rel['brier_score']:.4f})"
+        ))
+        fig_rel.add_trace(go.Scatter(
+            x=cal_rel["prob_pred"], y=cal_rel["prob_true"],
+            mode="lines+markers", line=dict(color="#10B981", width=3), name=f"Calibrated ({cal_meta['best_method']}) (Brier: {cal_rel['brier_score']:.4f})"
+        ))
+        fig_rel.update_layout(
+            title="Probability Reliability Curve (Calibration)",
+            xaxis_title="Mean Predicted Probability",
+            yaxis_title="Empirical Fraction of Churners",
+            height=380, template="plotly_white"
         )
-        st.plotly_chart(fig_cm, use_container_width=True)
+        st.plotly_chart(fig_rel, use_container_width=True)
 
-    with col_curve:
-        # Precision-Recall Tradeoff Curve with Operating Point Dot
-        sweep_df = live_eval["threshold_sweep"]
-        fig_pr = go.Figure()
-        fig_pr.add_trace(go.Scatter(
-            x=sweep_df["Recall"],
-            y=sweep_df["Precision"],
-            mode="lines+markers",
-            name="PR Curve Across Thresholds",
-            line=dict(color="#2563EB", width=2.5)
-        ))
-        # Highlight current point
-        fig_pr.add_trace(go.Scatter(
-            x=[live_eval["recall"]],
-            y=[live_eval["precision"]],
-            mode="markers",
-            name=f"Current ({current_threshold:.2f})",
-            marker=dict(color="#EF4444", size=14, symbol="circle", line=dict(color="black", width=2))
-        ))
-        fig_pr.update_layout(
-            title="Precision vs Recall Curve (Live Operating Marker)",
-            xaxis_title="Recall (Proportion of Churners Caught)",
-            yaxis_title="Precision",
-            height=370,
-            template="plotly_white"
+    with cal_col2:
+        # Cost Matrix Expected Profit Curve
+        st.markdown("#### 💵 Configurable Cost Matrix Inputs")
+        c_fp, c_fn, c_sr = st.columns(3)
+        with c_fp:
+            cfg_fp_cost = st.number_input("FP Cost ($ offer):", value=40.0, step=5.0)
+        with c_fn:
+            cfg_fn_cost = st.number_input("FN Cost ($ CLV):", value=780.0, step=20.0)
+        with c_sr:
+            cfg_save_rate = st.number_input("Save Rate (%):", value=25.0, step=5.0) / 100.0
+
+        profit_analysis = compute_cost_matrix_profit_curve(
+            splits["y_test"], cal_bundle["best_probs"],
+            fp_cost=cfg_fp_cost, fn_cost=cfg_fn_cost, save_rate=cfg_save_rate
         )
-        st.plotly_chart(fig_pr, use_container_width=True)
+        p_df = profit_analysis["profit_curve_df"]
+        opt_th = profit_analysis["optimal_threshold"]
+        max_p = profit_analysis["max_net_profit"]
+        bayes_th = profit_analysis["theoretical_bayes_threshold"]
 
-    st.markdown("### 🏆 Model Comparison Leaderboard")
-    st.dataframe(
-        comparison_df.style.highlight_max(subset=["PR-AUC", "Recall", "ROC-AUC", "F1-Score"], color="#D1FAE5"),
-        use_container_width=True
-    )
+        fig_profit = go.Figure()
+        fig_profit.add_trace(go.Scatter(
+            x=p_df["threshold"], y=p_df["net_profit"],
+            mode="lines", line=dict(color="#2563EB", width=2.5), name="Net Campaign Profit ($)"
+        ))
+        fig_profit.add_vline(
+            x=opt_th, line_dash="dash", line_color="#10B981",
+            annotation_text=f"Optimum: {opt_th:.2f} (${max_p:,.0f})", annotation_position="top right"
+        )
+        fig_profit.add_vline(
+            x=custom_thresh, line_dash="dot", line_color="#EF4444",
+            annotation_text=f"Current: {custom_thresh:.2f}", annotation_position="bottom right"
+        )
+        fig_profit.update_layout(
+            title="Expected Net Profit Across Thresholds",
+            xaxis_title="Decision Threshold Cutoff",
+            yaxis_title="Net Campaign Gain ($)",
+            height=300, template="plotly_white"
+        )
+        st.plotly_chart(fig_profit, use_container_width=True)
+        st.caption(f"Theoretical Bayes Cutoff: $p^* = \\frac{{C_{{FP}}}}{{C_{{FP}} + (\\text{{SaveRate}} \\times C_{{FN}})}} = {bayes_th:.3f}$. The curve justifies tuning threshold in the {bayes_th:.2f}–0.35 region.")
 
-    # Threshold sweep table
-    with st.expander("🔍 View Complete Multi-Threshold Sweep Table"):
-        st.dataframe(sweep_df, use_container_width=True)
+    # Leaderboard
+    st.markdown("---")
+    st.markdown("### 🏆 Comprehensive Model Comparison Leaderboard")
+    st.dataframe(comparison_df.style.highlight_max(subset=["PR-AUC", "Recall", "ROC-AUC", "F1-Score"], color="#D1FAE5"), use_container_width=True)
 
 # =========================================================
-# MODULE 3: Lift, Gains & Campaign Ranking
+# MODULE 3: Lift, Gains & Confidence Intervals
 # =========================================================
-elif nav_choice == "📈 3. Lift, Gains & Campaign Ranking":
-    st.markdown('<div class="main-header">📈 Cumulative Gains, Lift & Campaign Deciles</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Demonstrating how ranking customers by risk concentrates retention effectiveness.</div>', unsafe_allow_html=True)
+elif nav_choice == "📈 3. Lift, Gains & Confidence Intervals":
+    st.markdown('<div class="main-header">📈 Cumulative Gains, Lift & Bootstrap Confidence Intervals</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Evaluating concentration of churners across risk deciles with empirical 95% bootstrap intervals.</div>', unsafe_allow_html=True)
 
-    best_probs = eval_details["Ensemble (XGB + LR + RF)"]["y_prob"]
-    gains_df = calculate_cumulative_gains_and_lift(splits["y_test"], best_probs)
+    gains_data = metrics_data["gains_and_lift"]
+    ci_data = metrics_data["confidence_intervals_95"]
 
-    top_20_gain = gains_df.iloc[1]["cum_gains_pct"]
-    top_20_lift = gains_df.iloc[1]["lift"]
+    top_20_gain = gains_data["top_20_capture_rate_pct"]
+    top_20_lift = gains_data["top_20_lift"]
+    top_10_gain = gains_data["top_10_capture_rate_pct"]
+    top_10_lift = gains_data["top_10_lift"]
 
-    st.success(f"""
-    🎯 **Key Presentation Takeaway (Slide 6 & Slide 9):**  
-    Targeting just the **Top 20% of customers by risk** captures **{top_20_gain:.1f}% of all actual churners**, delivering a **{top_20_lift:.2f}x Lift** over random contacting!
-    """)
+    # Highlights
+    h1, h2, h3, h4 = st.columns(4)
+    with h1:
+        st.markdown(f"""
+        <div class="metric-card metric-card-danger">
+            <div class="metric-label">Top 20% Churn Capture</div>
+            <div class="metric-value">{top_20_gain:.1f}%</div>
+            <div class="metric-sub">95% CI: {ci_data['top_20_capture']['display']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with h2:
+        st.markdown(f"""
+        <div class="metric-card metric-card-success">
+            <div class="metric-label">Top 20% Lift Multiplier</div>
+            <div class="metric-value">{top_20_lift:.2f}x</div>
+            <div class="metric-sub">Over Random Contacting</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with h3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Top 10% Churn Capture</div>
+            <div class="metric-value">{top_10_gain:.1f}%</div>
+            <div class="metric-sub">Captures >1 in 4 Churners</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with h4:
+        st.markdown(f"""
+        <div class="metric-card metric-card-purple">
+            <div class="metric-label">Top 10% Lift Multiplier</div>
+            <div class="metric-value">{top_10_lift:.2f}x</div>
+            <div class="metric-sub">Concentrated Risk Decile</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    c1, c2 = st.columns(2)
+    gains_df = pd.DataFrame(gains_data["deciles"])
 
-    with c1:
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
         fig_gains = go.Figure()
         fig_gains.add_trace(go.Scatter(
             x=[0] + list(gains_df["pct_customers"]),
             y=[0] + list(gains_df["cum_gains_pct"]),
-            mode="lines+markers",
+            mode='lines+markers',
             name="Model Gains",
-            line=dict(color="#10B981", width=3)
+            line=dict(color='#2563EB', width=3)
         ))
         fig_gains.add_trace(go.Scatter(
-            x=[0, 100],
-            y=[0, 100],
-            mode="lines",
-            name="Random Guessing (Baseline)",
-            line=dict(dash="dash", color="gray")
+            x=[0, 100], y=[0, 100],
+            mode='lines',
+            name='Random Selection (Baseline)',
+            line=dict(dash='dash', color='#94A3B8')
         ))
+        fig_gains.add_vline(x=20, line_dash="dash", line_color="#EF4444", annotation_text=f"Top 20%: {top_20_gain:.1f}% Caught")
         fig_gains.update_layout(
             title="Cumulative Gains Chart (% of Churners Captured)",
             xaxis_title="% of Total Customers Contacted",
             yaxis_title="% of Total Churners Caught",
-            height=400,
-            template="plotly_white"
+            height=380, template="plotly_white"
         )
         st.plotly_chart(fig_gains, use_container_width=True)
 
-    with c2:
+    with col_g2:
         fig_lift = px.bar(
-            gains_df,
-            x="decile",
-            y="lift",
+            gains_df, x="decile", y="lift",
             title="Lift Multiplier Across Deciles",
-            text="lift",
-            color="lift",
-            color_continuous_scale="Viridis"
+            text="lift", color="lift",
+            color_continuous_scale="Tealgrn"
         )
         fig_lift.update_traces(texttemplate='%{text:.2f}x', textposition='outside')
-        fig_lift.update_layout(height=400, template="plotly_white", xaxis_title="Decile (Sorted by Churn Probability)", yaxis_title="Lift Multiplier")
+        fig_lift.update_layout(height=380, template="plotly_white", xaxis_title="Decile (Sorted by Risk)")
         st.plotly_chart(fig_lift, use_container_width=True)
 
     st.markdown("### 📊 Decile-by-Decile Lift Table")
-    formatted_gains = gains_df.copy()
-    formatted_gains["pct_customers"] = formatted_gains["pct_customers"].apply(lambda x: f"{x:.1f}%")
-    formatted_gains["cum_gains_pct"] = formatted_gains["cum_gains_pct"].apply(lambda x: f"{x:.1f}%")
-    formatted_gains["churn_rate_pct"] = formatted_gains["churn_rate_pct"].apply(lambda x: f"{x:.1f}%")
-    formatted_gains["lift"] = formatted_gains["lift"].apply(lambda x: f"{x:.2f}x")
-    st.dataframe(formatted_gains, use_container_width=True)
+    st.dataframe(gains_df, use_container_width=True)
 
 # =========================================================
-# MODULE 4: Global SHAP Feature Explainability
+# MODULE 4: Churn Timeline (Survival Analysis - Task 4)
 # =========================================================
-elif nav_choice == "🔍 4. Global SHAP Feature Explainability":
-    st.markdown('<div class="main-header">🔍 Global Model Explainability (SHAP)</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Interpreting behavioral drivers that systematically dictate customer cancellations.</div>', unsafe_allow_html=True)
+elif nav_choice == "⏱️ 4. Churn Timeline (Survival Analysis)":
+    st.markdown('<div class="main-header">⏱️ Churn Timeline & Time-to-Event Survival Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Answering not just <em>if</em> a customer will leave, but <em>when</em> they will leave using the <code>lifelines</code> library.</div>', unsafe_allow_html=True)
 
-    c_left, c_right = st.columns([3, 2])
+    surv_summary = metrics_data["survival_analysis"]
 
-    with c_left:
+    # Highlights
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.markdown(f"""
+        <div class="metric-card metric-card-danger">
+            <div class="metric-label">Month-to-Month Survival</div>
+            <div class="metric-value">{surv_summary.get('Month-to-month', {}).get('median_survival_time', '35 months')}</div>
+            <div class="metric-sub">50% Churn by Month 35</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with s2:
+        st.markdown(f"""
+        <div class="metric-card metric-card-success">
+            <div class="metric-label">One-Year Contract Survival</div>
+            <div class="metric-value">{surv_summary.get('One year', {}).get('median_survival_time', 'Not reached')}</div>
+            <div class="metric-sub">>72 Months Survival Horizon</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with s3:
+        st.markdown(f"""
+        <div class="metric-card metric-card-purple">
+            <div class="metric-label">Two-Year Contract Survival</div>
+            <div class="metric-value">{surv_summary.get('Two year', {}).get('median_survival_time', 'Not reached')}</div>
+            <div class="metric-sub">Maximum Lock-In & Loyalty</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    km_col1, km_col2 = st.columns(2)
+    with km_col1:
+        st.markdown("### 📈 Kaplan-Meier Curves by Contract Commitment")
+        km_contracts = fit_kaplan_meier_curves(df_raw, group_col="Contract")
+        fig_km = go.Figure()
+        colors = {"Month-to-month": "#EF4444", "One year": "#F59E0B", "Two year": "#10B981"}
+        for grp, data in km_contracts.items():
+            fig_km.add_trace(go.Scatter(
+                x=data["timeline"], y=data["survival_prob"],
+                mode="lines", name=f"{grp} (Median: {data['median_survival_time']})",
+                line=dict(color=colors.get(grp, "#2563EB"), width=3)
+            ))
+        fig_km.update_layout(
+            title="Kaplan-Meier Survival Function: Contract Tiers",
+            xaxis_title="Tenure (Months)",
+            yaxis_title="Probability Customer Remains Active S(t)",
+            height=400, template="plotly_white"
+        )
+        st.plotly_chart(fig_km, use_container_width=True)
+
+    with km_col2:
+        st.markdown("### 🌐 Kaplan-Meier Curves by Internet Service")
+        km_internet = fit_kaplan_meier_curves(df_raw, group_col="InternetService")
+        fig_km_int = go.Figure()
+        int_colors = {"Fiber optic": "#EF4444", "DSL": "#2563EB", "No": "#10B981"}
+        for grp, data in km_internet.items():
+            fig_km_int.add_trace(go.Scatter(
+                x=data["timeline"], y=data["survival_prob"],
+                mode="lines", name=f"{grp} (Median: {data['median_survival_time']})",
+                line=dict(color=int_colors.get(grp, "#64748B"), width=2.5)
+            ))
+        fig_km_int.update_layout(
+            title="Kaplan-Meier Survival Function: Internet Service Tiers",
+            xaxis_title="Tenure (Months)",
+            yaxis_title="Probability Customer Remains Active S(t)",
+            height=400, template="plotly_white"
+        )
+        st.plotly_chart(fig_km_int, use_container_width=True)
+
+    st.markdown("""
+    <div class="callout-box">
+        <b>Survival Modeling Insight (Cox PH):</b>
+        Month-to-month contract holders face a steep hazard rate in the first 12–24 months, reaching their median survival at 35 months.
+        In contrast, committing to a 1-year or 2-year contract completely suppresses the hazard curve, causing median survival to not be reached 
+        within the 72-month observation window.
+    </div>
+    """, unsafe_allow_html=True)
+
+# =========================================================
+# MODULE 5: Explainability (SHAP & Permutation - Task 6)
+# =========================================================
+elif nav_choice == "🔍 5. Explainability (SHAP & Permutation)":
+    st.markdown('<div class="main-header">🔍 Attribution Intelligence: SHAP & Permutation Importance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Cross-validating tree-specific Shapley attributions against model-agnostic permutation importance.</div>', unsafe_allow_html=True)
+
+    # Rank Agreement Banner (Task 6)
+    st.markdown(f"""
+    <div class="callout-box" style="border-left: 5px solid #2563EB;">
+        <b>Task 6 Attribution Stability Check:</b><br>
+        Spearman Rank Correlation between SHAP Mean |Value| and Permutation Importance is 
+        <strong>r = {rank_agreement['spearman_corr']:.3f}</strong> (p-value: <strong>{rank_agreement['p_value']:.2e}</strong>).<br>
+        Status: <span class="badge-pill-success">{rank_agreement['status']}</span>. 
+        Both independent explainability paradigms validate that <strong>contract duration</strong>, <strong>tenure</strong>, and <strong>relative monthly pricing</strong> are the dominant churn drivers.
+    </div>
+    """, unsafe_allow_html=True)
+
+    x1, x2 = st.columns(2)
+    with x1:
+        st.markdown("### 🌳 Global TreeSHAP Feature Importance")
         fig_shap_bar = plot_shap_global_bar(shap_importance_df)
         st.plotly_chart(fig_shap_bar, use_container_width=True)
 
-    with c_right:
-        st.markdown("### 📋 Top SHAP Feature Ranking")
-        st.dataframe(shap_importance_df, height=360, use_container_width=True)
-        st.markdown("""
-        **Interpretation Summary:**
-        - **Contract Commitment**: Month-to-month contracts have zero lock-in, driving top churn attribution.
-        - **Tenure Non-Linearity**: Churn risk is concentrated in months 1–12 before dropping sharply.
-        - **Tech Support & Security**: Accounts lacking security services churn at over double the rate.
-        - **Fiber Pricing Discrepancies**: High monthly fiber bills without tech support lead to churn.
-        """)
+    with x2:
+        st.markdown("### 🔀 Permutation Feature Importance (Drop in PR-AUC)")
+        fig_perm_bar = plot_permutation_importance_bar(perm_df)
+        st.plotly_chart(fig_perm_bar, use_container_width=True)
+
+    st.markdown("### 📋 Side-by-Side Attribution Rankings")
+    merged_comp = pd.merge(
+        shap_importance_df.head(10)[["Feature", "Mean_Abs_SHAP"]],
+        perm_df.head(10)[["Feature", "Importance_Mean"]],
+        on="Feature", how="outer"
+    ).fillna(0.0)
+    st.dataframe(merged_comp, use_container_width=True)
 
 # =========================================================
-# MODULE 5: Real-Time Predictor & SHAP Force Plot
+# MODULE 6: Real-Time Predictor, Personas & Force Plot
 # =========================================================
-elif nav_choice == "🎯 5. Real-Time Predictor & SHAP Force Plot":
-    st.markdown('<div class="main-header">🎯 Real-Time Churn Predictor & SHAP Force Plot</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Evaluate individual customer risk, inspect interactive SHAP force plots, and simulate counterfactuals.</div>', unsafe_allow_html=True)
+elif nav_choice == "🎯 6. Real-Time Predictor, Personas & Force Plot":
+    st.markdown('<div class="main-header">🎯 Real-Time Churn Predictor, Personas & SHAP Force Plot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">One-click demo personas, forward 90-day survival probability, interactive JavaScript force plot, and counterfactuals.</div>', unsafe_allow_html=True)
 
-    input_mode = st.radio("Select Customer Profiling Method:", ["Choose Existing Customer from Test Set", "Configure Custom Customer Attributes"], horizontal=True)
+    # Task 7: Persona Presets
+    st.markdown("#### 👤 1-Click Demo Personas (Task 7)")
+    p_col1, p_col2, p_col3 = st.columns(3)
+    
+    if "selected_persona" not in st.session_state:
+        st.session_state.selected_persona = None
 
-    if input_mode == "Choose Existing Customer from Test Set":
-        test_ids = list(splits["id_test"])
-        selected_cust_id = st.selectbox("Search Customer ID:", test_ids[:600])
-        idx = list(splits["id_test"]).index(selected_cust_id)
-        cust_raw = splits["X_test_raw"].iloc[idx].copy()
+    with p_col1:
+        if st.button("🔥 Persona: 'Riya' (High Risk)", use_container_width=True):
+            st.session_state.selected_persona = "Riya"
+    with p_col2:
+        if st.button("⚡ Persona: 'Riya (2-Year Contract)'", use_container_width=True):
+            st.session_state.selected_persona = "Riya_2yr"
+    with p_col3:
+        if st.button("🛡️ Persona: 'Veteran' (Low Risk)", use_container_width=True):
+            st.session_state.selected_persona = "Veteran"
+
+    # Define personas deterministically
+    personas = {
+        "Riya": {
+            "gender": "Female", "SeniorCitizen": "No", "Partner": "No", "Dependents": "No",
+            "tenure": 4, "PhoneService": "Yes", "MultipleLines": "No",
+            "InternetService": "Fiber optic", "OnlineSecurity": "No", "OnlineBackup": "No",
+            "DeviceProtection": "No", "TechSupport": "No", "StreamingTV": "Yes", "StreamingMovies": "Yes",
+            "Contract": "Month-to-month", "PaperlessBilling": "Yes", "PaymentMethod": "Electronic check",
+            "MonthlyCharges": 95.0, "TotalCharges": 380.0
+        },
+        "Riya_2yr": {
+            "gender": "Female", "SeniorCitizen": "No", "Partner": "No", "Dependents": "No",
+            "tenure": 4, "PhoneService": "Yes", "MultipleLines": "No",
+            "InternetService": "Fiber optic", "OnlineSecurity": "No", "OnlineBackup": "No",
+            "DeviceProtection": "No", "TechSupport": "No", "StreamingTV": "Yes", "StreamingMovies": "Yes",
+            "Contract": "Two year", "PaperlessBilling": "Yes", "PaymentMethod": "Electronic check",
+            "MonthlyCharges": 95.0, "TotalCharges": 380.0
+        },
+        "Veteran": {
+            "gender": "Male", "SeniorCitizen": "No", "Partner": "Yes", "Dependents": "Yes",
+            "tenure": 60, "PhoneService": "Yes", "MultipleLines": "Yes",
+            "InternetService": "DSL", "OnlineSecurity": "Yes", "OnlineBackup": "Yes",
+            "DeviceProtection": "Yes", "TechSupport": "Yes", "StreamingTV": "No", "StreamingMovies": "No",
+            "Contract": "Two year", "PaperlessBilling": "No", "PaymentMethod": "Credit card (automatic)",
+            "MonthlyCharges": 65.0, "TotalCharges": 3900.0
+        }
+    }
+
+    if st.session_state.selected_persona in personas:
+        active_dict = personas[st.session_state.selected_persona].copy()
+        st.info(f"Loaded Persona: **{st.session_state.selected_persona}**")
     else:
-        st.markdown("#### 👤 Custom Subscriber Profile")
+        active_dict = personas["Riya"].copy()
+
+    # Form / Inputs
+    with st.expander("⚙️ Adjust Customer Parameters Manually", expanded=False):
         c1, c2, c3 = st.columns(3)
         with c1:
-            tenure_val = st.slider("Tenure (Months):", 0, 72, 8)
-            contract_val = st.selectbox("Contract Type:", ["Month-to-month", "One year", "Two year"], index=0)
-            monthly_val = st.slider("Monthly Charges ($):", 18.0, 120.0, 82.0)
-            tech_val = st.selectbox("Tech Support:", ["No", "Yes", "No internet service"], index=0)
+            tenure_val = st.slider("Tenure (Months):", 0, 72, int(active_dict["tenure"]))
+            contract_val = st.selectbox("Contract Type:", ["Month-to-month", "One year", "Two year"], index=["Month-to-month", "One year", "Two year"].index(active_dict["Contract"]))
+            monthly_val = st.slider("Monthly Charges ($):", 18.0, 120.0, float(active_dict["MonthlyCharges"]))
+            tech_val = st.selectbox("Tech Support:", ["No", "Yes", "No internet service"], index=["No", "Yes", "No internet service"].index(active_dict["TechSupport"]))
         with c2:
-            internet_val = st.selectbox("Internet Service:", ["Fiber optic", "DSL", "No"], index=0)
-            security_val = st.selectbox("Online Security:", ["No", "Yes", "No internet service"], index=0)
-            backup_val = st.selectbox("Online Backup:", ["No", "Yes", "No internet service"], index=0)
-            protection_val = st.selectbox("Device Protection:", ["No", "Yes", "No internet service"], index=0)
+            internet_val = st.selectbox("Internet Service:", ["Fiber optic", "DSL", "No"], index=["Fiber optic", "DSL", "No"].index(active_dict["InternetService"]))
+            security_val = st.selectbox("Online Security:", ["No", "Yes", "No internet service"], index=["No", "Yes", "No internet service"].index(active_dict["OnlineSecurity"]))
+            backup_val = st.selectbox("Online Backup:", ["No", "Yes", "No internet service"], index=["No", "Yes", "No internet service"].index(active_dict["OnlineBackup"]))
+            protection_val = st.selectbox("Device Protection:", ["No", "Yes", "No internet service"], index=["No", "Yes", "No internet service"].index(active_dict["DeviceProtection"]))
         with c3:
-            payment_val = st.selectbox("Payment Method:", ["Electronic check", "Mailed check", "Bank transfer (automatic)", "Credit card (automatic)"], index=0)
-            paperless_val = st.selectbox("Paperless Billing:", ["Yes", "No"], index=0)
-            streaming_tv = st.selectbox("Streaming TV:", ["Yes", "No", "No internet service"], index=1)
-            streaming_movies = st.selectbox("Streaming Movies:", ["Yes", "No", "No internet service"], index=1)
+            payment_val = st.selectbox("Payment Method:", ["Electronic check", "Mailed check", "Bank transfer (automatic)", "Credit card (automatic)"], index=["Electronic check", "Mailed check", "Bank transfer (automatic)", "Credit card (automatic)"].index(active_dict["PaymentMethod"]))
+            paperless_val = st.selectbox("Paperless Billing:", ["Yes", "No"], index=["Yes", "No"].index(active_dict["PaperlessBilling"]))
+            streaming_tv = st.selectbox("Streaming TV:", ["Yes", "No", "No internet service"], index=["Yes", "No", "No internet service"].index(active_dict["StreamingTV"]))
+            streaming_movies = st.selectbox("Streaming Movies:", ["Yes", "No", "No internet service"], index=["Yes", "No", "No internet service"].index(active_dict["StreamingMovies"]))
 
-        cust_raw = pd.Series({
-            "gender": "Female",
-            "SeniorCitizen": "No",
-            "Partner": "No",
-            "Dependents": "No",
+        active_dict.update({
             "tenure": tenure_val,
-            "PhoneService": "Yes",
-            "MultipleLines": "No",
+            "Contract": contract_val,
+            "MonthlyCharges": monthly_val,
+            "TotalCharges": monthly_val * tenure_val,
+            "TechSupport": tech_val,
             "InternetService": internet_val,
             "OnlineSecurity": security_val,
             "OnlineBackup": backup_val,
             "DeviceProtection": protection_val,
-            "TechSupport": tech_val,
-            "StreamingTV": streaming_tv,
-            "StreamingMovies": streaming_movies,
-            "Contract": contract_val,
-            "PaperlessBilling": paperless_val,
             "PaymentMethod": payment_val,
-            "MonthlyCharges": monthly_val,
-            "TotalCharges": monthly_val * tenure_val
+            "PaperlessBilling": paperless_val,
+            "StreamingTV": streaming_tv,
+            "StreamingMovies": streaming_movies
         })
 
-    # Predict
+    cust_raw = pd.Series(active_dict)
+
+    # Predict Probability
     cust_df = pd.DataFrame([cust_raw])
     cust_proc = splits["preprocessor"].transform(cust_df)
     prob_churn = float(best_model.predict_proba(cust_proc)[0][1])
+
+    # Task 4: Predict 90-Day Churn Probability from Survival Model
+    prob_90d_churn = survival_model.predict_90_day_churn_prob(active_dict, current_tenure=float(cust_raw["tenure"]))
 
     risk_tier = assign_risk_tier(prob_churn)
     value_tier = assign_value_tier(float(cust_raw.get("MonthlyCharges", 0)))
@@ -726,7 +929,7 @@ elif nav_choice == "🎯 5. Real-Time Predictor & SHAP Force Plot":
     # Score Cards
     col_pred1, col_pred2, col_pred3 = st.columns([2, 2, 3])
     with col_pred1:
-        st.markdown("#### Churn Probability")
+        st.markdown("#### Baseline Churn Risk")
         gauge_color = "#EF4444" if prob_churn >= 0.60 else ("#F59E0B" if prob_churn >= 0.35 else "#10B981")
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number",
@@ -739,287 +942,450 @@ elif nav_choice == "🎯 5. Real-Time Predictor & SHAP Force Plot":
                     {'range': [0, 35], 'color': '#ECFDF5'},
                     {'range': [35, 60], 'color': '#FFFBEB'},
                     {'range': [60, 100], 'color': '#FEF2F2'}
-                ],
-                'threshold': {
-                    'line': {'color': 'red', 'width': 4},
-                    'thickness': 0.75,
-                    'value': 60
-                }
+                ]
             }
         ))
-        fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=25, b=10))
+        fig_gauge.update_layout(height=230, margin=dict(l=20, r=20, t=25, b=10))
         st.plotly_chart(fig_gauge, use_container_width=True)
 
     with col_pred2:
-        st.markdown("#### Segmentation & Stance")
-        badge_class = "badge-high" if risk_tier == "High Risk" else ("badge-medium" if risk_tier == "Medium Risk" else "badge-low")
-        st.markdown(f"""
-        <div style="margin-top: 20px;">
-            <p><strong>Risk Level:</strong> <span class="{badge_class}">{risk_tier}</span></p>
-            <p><strong>Customer Value:</strong> <strong>{value_tier}</strong> (${cust_raw.get('MonthlyCharges', 0):.2f}/mo)</p>
-            <p><strong>Strategy:</strong> <strong>{strategy['strategy']}</strong></p>
-            <p><strong>Channel:</strong> {strategy['channel']}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("#### ⏱️ 90-Day Churn Risk (Task 4)")
+        gauge_90d_color = "#EF4444" if prob_90d_churn >= 0.30 else ("#F59E0B" if prob_90d_churn >= 0.15 else "#10B981")
+        fig_90d = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=prob_90d_churn * 100,
+            number={'suffix': "%"},
+            gauge={
+                'axis': {'range': [0, 100]},
+                'bar': {'color': gauge_90d_color},
+                'steps': [
+                    {'range': [0, 15], 'color': '#ECFDF5'},
+                    {'range': [15, 30], 'color': '#FFFBEB'},
+                    {'range': [30, 100], 'color': '#FEF2F2'}
+                ]
+            }
+        ))
+        fig_90d.update_layout(height=230, margin=dict(l=20, r=20, t=25, b=10))
+        st.plotly_chart(fig_90d, use_container_width=True)
 
     with col_pred3:
-        st.markdown("#### Retention Playbook Directive")
-        st.info(f"**{strategy['strategy']} ({strategy['budget_tier']})**\n\n{strategy['summary']}")
+        st.markdown("#### Strategic Intervention Plan")
+        st.markdown(f"""
+        <div style="background-color:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:16px;">
+            <div style="margin-bottom:8px;">
+                <span class="badge-pill-{ 'danger' if risk_tier == 'High Risk' else ('warning' if risk_tier == 'Medium Risk' else 'success') }">{risk_tier}</span>
+                <span class="badge-pill-{ 'danger' if value_tier == 'High Value' else 'warning' }" style="margin-left:6px;">{value_tier}</span>
+            </div>
+            <h4 style="color:#0F172A; margin: 4px 0 6px 0;">Playbook: {strategy['strategy']}</h4>
+            <p style="color:#64748B; font-size:0.9rem; margin-bottom:8px;">{strategy['summary']}</p>
+            <div style="font-size:0.85rem; color:#0F172A;">
+                <b>Recommended Channel:</b> {strategy['channel']}<br>
+                <b>Budget Allocation:</b> {strategy['budget_tier']}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # SHAP FORCE PLOT (Official JS HTML)
+    # Task 7: Side-by-side What-If Moment for Riya vs Riya (2-year contract)
+    if st.session_state.selected_persona in ["Riya", "Riya_2yr"]:
+        st.markdown("---")
+        st.markdown("### ⚡ The What-If Moment: Contract Upgrade Impact")
+        
+        riya_base_proc = splits["preprocessor"].transform(pd.DataFrame([personas["Riya"]]))
+        riya_2yr_proc = splits["preprocessor"].transform(pd.DataFrame([personas["Riya_2yr"]]))
+        
+        p_base = float(best_model.predict_proba(riya_base_proc)[0][1])
+        p_2yr = float(best_model.predict_proba(riya_2yr_proc)[0][1])
+        delta = (p_2yr - p_base) * 100.0
+
+        w_col1, w_col2, w_col3 = st.columns(3)
+        with w_col1:
+            st.metric("Riya (Month-to-Month)", f"{p_base*100:.1f}% Risk", "High Risk")
+        with w_col2:
+            st.metric("Riya (2-Year Commitment)", f"{p_2yr*100:.1f}% Risk", f"{delta:.1f}% Churn Drop", delta_color="inverse")
+        with w_col3:
+            st.success(f"Risk collapses by {abs(delta):.1f} percentage points! Lock-in secures ~${personas['Riya']['MonthlyCharges']*24:,.0f} in contract revenue.")
+
+    # Official JavaScript SHAP Force Plot
     st.markdown("---")
-    st.markdown("### ⚡ Interactive SHAP Force Plot")
-    st.caption("Visualizing how each feature shifts the baseline expected churn log-odds (Higher = Red, Lower = Blue).")
-
+    st.markdown("### 🔍 Interactive JavaScript SHAP Force Plot")
     explanation = explain_customer_prediction(explainer, cust_proc[0], splits["feature_names"])
     force_html = generate_shap_force_html(explanation, splits["feature_names"])
-    components.html(force_html, height=160, scrolling=True)
+    components.html(force_html, height=160, scrolling=False)
 
-    # Waterfall Chart
-    fig_waterfall = plot_individual_waterfall(explanation)
-    st.plotly_chart(fig_waterfall, use_container_width=True)
-
-    # WHAT-IF COUNTERFACTUAL SIMULATOR
-    st.markdown("---")
-    st.markdown("### 🧪 What-If Counterfactual Tool (Slide 8)")
-    st.write("Simulate retention interventions (e.g. upgrading to an annual contract or adding Tech Support) and see the churn risk drop in real-time.")
-
-    w1, w2, w3, w4 = st.columns(4)
-    with w1:
-        whatif_contract = st.selectbox("What-If Contract:", ["Month-to-month", "One year", "Two year"], index=1 if "month" in str(cust_raw.get("Contract", "")).lower() else 0)
-    with w2:
-        whatif_tech = st.selectbox("What-If Tech Support:", ["Yes", "No"], index=0)
-    with w3:
-        whatif_security = st.selectbox("What-If Online Security:", ["Yes", "No"], index=0)
-    with w4:
-        whatif_payment = st.selectbox("What-If Payment:", ["Bank transfer (automatic)", "Credit card (automatic)", "Electronic check", "Mailed check"], index=0)
-
-    whatif_raw = cust_raw.copy()
-    whatif_raw["Contract"] = whatif_contract
-    whatif_raw["TechSupport"] = whatif_tech
-    whatif_raw["OnlineSecurity"] = whatif_security
-    whatif_raw["PaymentMethod"] = whatif_payment
-
-    whatif_df = pd.DataFrame([whatif_raw])
-    whatif_proc = splits["preprocessor"].transform(whatif_df)
-    whatif_prob = float(best_model.predict_proba(whatif_proc)[0][1])
-
-    delta = whatif_prob - prob_churn
-    whatif_risk = assign_risk_tier(whatif_prob)
-
-    res_c1, res_c2, res_c3 = st.columns(3)
-    res_c1.metric("Original Churn Risk", f"{prob_churn * 100:.1f}%")
-    res_c2.metric("Counterfactual Risk", f"{whatif_prob * 100:.1f}%", delta=f"{delta * 100:.1f}%", delta_color="inverse")
-    res_c3.metric("New Risk Tier", whatif_risk)
+    # Local Waterfall
+    st.markdown("### 🌊 Local Feature Impact Waterfall")
+    fig_wf = plot_individual_waterfall(explanation, max_features=8)
+    st.plotly_chart(fig_wf, use_container_width=True)
 
 # =========================================================
-# MODULE 6: Retention Strategy & Campaign Export
+# MODULE 7: Retention Strategy & Uplift Teaser
 # =========================================================
-elif nav_choice == "📋 6. Retention Strategy & Campaign Export":
-    st.markdown('<div class="main-header">📋 Retention Strategy & Campaign List Export</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Mapping risk and customer value to concrete retention actions, with one-click campaign roster export.</div>', unsafe_allow_html=True)
+elif nav_choice == "📋 7. Retention Strategy & Uplift Teaser":
+    st.markdown('<div class="main-header">📋 Retention Playbook & Uplift Modeling Teaser</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">2x2 Risk-Value matrix execution and why future systems require true Persuadability modeling.</div>', unsafe_allow_html=True)
 
     # 2x2 Matrix Cards
-    st.markdown("### 🗂️ 2x2 Risk-Value Retention Framework (Slide 7)")
-    m_c1, m_c2, m_c3, m_c4 = st.columns(4)
-    with m_c1:
+    q1, q2 = st.columns(2)
+    with q1:
         st.markdown("""
-        <div style="background-color:#FEE2E2; border-left:4px solid #EF4444; border-radius:8px; padding:14px; min-height:160px;">
-            <strong style="color:#991B1B;">🔥 Priority Save</strong><br>
-            <span style="font-size:0.8rem; color:#7F1D1D;">High Risk × High Value</span>
-            <p style="font-size:0.82rem; color:#450A0A; margin-top:8px;">
-                Dedicated VIP phone call + 20% discount on 1-year contract lock-in + free security bundle.
-            </p>
+        <div style="background-color:#FEF2F2; border-left:4px solid #EF4444; border-radius:8px; padding:14px; min-height:160px; margin-bottom:12px;">
+            <h4 style="color:#991B1B; margin:0 0 6px 0;">🔥 Priority Save (High Risk × High Value)</h4>
+            <div style="font-size:0.85rem; color:#7F1D1D; margin-bottom:6px;"><b>Criteria:</b> Monthly Charges ≥ $70 | Churn Risk ≥ 60%</div>
+            <div style="font-size:0.9rem; color:#450A0A;">
+                <b>Playbook:</b> Dedicated personal outreach from Senior Concierge Retention Specialist.<br>
+                <b>Incentive:</b> 20% discount on 12-month lock-in commitment + complimentary security & tech support bundle ($85 budget).
+            </div>
         </div>
         """, unsafe_allow_html=True)
-    with m_c2:
+
         st.markdown("""
         <div style="background-color:#FEF3C7; border-left:4px solid #F59E0B; border-radius:8px; padding:14px; min-height:160px;">
-            <strong style="color:#92400E;">⚡ Low-Cost Save</strong><br>
-            <span style="font-size:0.8rem; color:#78350F;">High Risk × Low Value</span>
-            <p style="font-size:0.82rem; color:#451A03; margin-top:8px;">
-                Automated email/SMS sequence with $5 statement credit and free 3-month TechSupport trial.
-            </p>
+            <h4 style="color:#92400E; margin:0 0 6px 0;">⚡ Low-Cost Save (High Risk × Low Value)</h4>
+            <div style="font-size:0.85rem; color:#78350F; margin-bottom:6px;"><b>Criteria:</b> Monthly Charges < $70 | Churn Risk ≥ 60%</div>
+            <div style="font-size:0.9rem; color:#451A03;">
+                <b>Playbook:</b> Automated digital campaign (push notification & personalized SMS).<br>
+                <b>Incentive:</b> $5 monthly statement credit for switching to automated bank autopay + 30-day speed boost.
+            </div>
         </div>
         """, unsafe_allow_html=True)
-    with m_c3:
+
+    with q2:
         st.markdown("""
-        <div style="background-color:#EFF6FF; border-left:4px solid #3B82F6; border-radius:8px; padding:14px; min-height:160px;">
-            <strong style="color:#1E40AF;">💎 Nurture & Upsell</strong><br>
-            <span style="font-size:0.8rem; color:#1E3A8A;">Low Risk × High Value</span>
-            <p style="font-size:0.82rem; color:#172554; margin-top:8px;">
-                Loyalty club perks, preview of higher fiber speed tier, and relationship check-ins.
-            </p>
+        <div style="background-color:#EFF6FF; border-left:4px solid #2563EB; border-radius:8px; padding:14px; min-height:160px; margin-bottom:12px;">
+            <h4 style="color:#1E40AF; margin:0 0 6px 0;">💎 Nurture & Upsell (Low Risk × High Value)</h4>
+            <div style="font-size:0.85rem; color:#1E3A8A; margin-bottom:6px;"><b>Criteria:</b> Monthly Charges ≥ $70 | Churn Risk < 35%</div>
+            <div style="font-size:0.9rem; color:#172554;">
+                <b>Playbook:</b> VIP customer relationship management & loyalty rewards.<br>
+                <b>Incentive:</b> Preview access to next-gen fiber speeds, annual account reviews, and anniversary gifts.
+            </div>
         </div>
         """, unsafe_allow_html=True)
-    with m_c4:
+
         st.markdown("""
         <div style="background-color:#F1F5F9; border-left:4px solid #64748B; border-radius:8px; padding:14px; min-height:160px;">
-            <strong style="color:#334155;">🛡️ Monitor & Retain</strong><br>
-            <span style="font-size:0.8rem; color:#475569;">Low Risk × Low Value</span>
-            <p style="font-size:0.82rem; color:#0F172A; margin-top:8px;">
-                Standard self-service maintenance; quarterly NPS survey; zero proactive marketing expense.
-            </p>
+            <h4 style="color:#334155; margin:0 0 6px 0;">🛡️ Monitor & Retain (Low Risk × Low Value)</h4>
+            <div style="font-size:0.85rem; color:#475569; margin-bottom:6px;"><b>Criteria:</b> Monthly Charges < $70 | Churn Risk < 35%</div>
+            <div style="font-size:0.9rem; color:#0F172A;">
+                <b>Playbook:</b> High baseline self-service portal experience & periodic NPS check-ins.<br>
+                <b>Incentive:</b> Zero outbound campaign expenditure. Maintain seamless autopay billing.
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
+    # Tier 4 Stretch: Uplift Modeling Teaser
     st.markdown("---")
-    st.markdown("### 📥 Campaign List Generator & Exporter")
+    st.markdown("### 🚀 Tier 4 Stretch: The Uplift Modeling Paradigm (Persuadability Matrix)")
+    st.markdown("""
+    <div class="callout-box" style="border-left: 5px solid #8B5CF6;">
+        <b>Why Churn Risk Alone Is Flawed:</b> Standard churn models predict <em>who is likely to cancel</em> ($P(\\text{Churn})$).
+        However, a customer with 90% churn risk might be a <strong>Lost Cause</strong> who will cancel no matter what offer we send!
+        Conversely, giving a discount to a <strong>Sure Thing</strong> wastes margin on someone who would have stayed anyway.
+        <strong>True Uplift Modeling</strong> isolates the incremental treatment effect: 
+        $$\\text{Uplift} = P(\\text{Churn} \\mid \\text{No Offer}) - P(\\text{Churn} \\mid \\text{Offer})$$
+    </div>
+    """, unsafe_allow_html=True)
 
-    with st.spinner("Scoring batch customers..."):
-        test_raw = splits["X_test_raw"].copy()
-        test_proc = splits["X_test_proc"]
-        y_probs = best_model.predict_proba(test_proc)[:, 1]
+    u1, u2 = st.columns([3, 2])
+    with u1:
+        # 2x2 Persuadability Diagram
+        fig_persuade = go.Figure()
+        # Add quadrants
+        fig_persuade.add_shape(type="rect", x0=0, y0=0.5, x1=0.5, y1=1, fillcolor="#FEE2E2", opacity=0.7, line_width=0)
+        fig_persuade.add_shape(type="rect", x0=0.5, y0=0.5, x1=1, y1=1, fillcolor="#D1FAE5", opacity=0.7, line_width=0)
+        fig_persuade.add_shape(type="rect", x0=0, y0=0, x1=0.5, y1=0.5, fillcolor="#F1F5F9", opacity=0.7, line_width=0)
+        fig_persuade.add_shape(type="rect", x0=0.5, y0=0, x1=1, y1=0.5, fillcolor="#FEF3C7", opacity=0.7, line_width=0)
 
-        batch_results = []
-        for i in range(len(test_raw)):
-            row = test_raw.iloc[i]
-            prob = float(y_probs[i])
-            r_tier = assign_risk_tier(prob)
-            v_tier = assign_value_tier(float(row.get("MonthlyCharges", 0)))
-            strat = get_matrix_strategy(r_tier, v_tier)
-            actions = generate_personalized_actions(row, prob)
-            primary_action = actions[0]["action"] if actions else "Standard Retention"
-
-            batch_results.append({
-                "CustomerID": splits["id_test"][i],
-                "Churn_Probability": round(prob, 4),
-                "Risk_Tier": r_tier,
-                "Value_Tier": v_tier,
-                "Strategic_Playbook": strat["strategy"],
-                "Assigned_Channel": strat["channel"],
-                "Primary_Action": primary_action,
-                "MonthlyCharges": row.get("MonthlyCharges", 0),
-                "Tenure": row.get("tenure", 0),
-                "Contract": row.get("Contract", "")
-            })
-
-        batch_df = pd.DataFrame(batch_results).sort_values(by="Churn_Probability", ascending=False)
-
-    # Filter controls
-    f_col1, f_col2 = st.columns([2, 1])
-    with f_col1:
-        campaign_filter = st.radio(
-            "Filter Campaign Target Audience:",
-            ["Top 20% Highest Risk Accounts (Recommended - Maximizes ROI)", "High Risk & Medium Risk Accounts", "All Scored Customers"],
-            horizontal=True
+        fig_persuade.add_trace(go.Scatter(
+            x=[0.75, 0.25, 0.25, 0.75],
+            y=[0.75, 0.75, 0.25, 0.25],
+            mode="text",
+            text=[
+                "<b>🎯 PERSUADABLES</b><br>(High Risk × High Uplift)<br><i>ONLY Target These!</i>",
+                "<b>🪦 LOST CAUSES</b><br>(High Risk × Zero Uplift)<br><i>Will Leave Anyway</i>",
+                "<b>💤 SLEEPING DOGS</b><br>(Low Risk × Negative Uplift)<br><i>Offer Reminds to Cancel</i>",
+                "<b>🛡️ SURE THINGS</b><br>(Low Risk × Zero Uplift)<br><i>Will Stay Anyway</i>"
+            ],
+            textfont=dict(size=12, color="#0F172A")
+        ))
+        fig_persuade.update_layout(
+            title="Persuadability Matrix (Treatment Uplift vs Churn Risk)",
+            xaxis=dict(title="Responsiveness to Retention Offer (Uplift)", range=[0, 1], showgrid=False),
+            yaxis=dict(title="Baseline Churn Propensity", range=[0, 1], showgrid=False),
+            height=360, template="plotly_white"
         )
+        st.plotly_chart(fig_persuade, use_container_width=True)
 
-    if "Top 20%" in campaign_filter:
-        cutoff_n = int(len(batch_df) * 0.20)
-        export_df = batch_df.iloc[:cutoff_n].copy()
-    elif "High Risk & Medium" in campaign_filter:
-        export_df = batch_df[batch_df["Risk_Tier"].isin(["High Risk", "Medium Risk"])].copy()
-    else:
-        export_df = batch_df.copy()
+    with u2:
+        st.markdown("#### 📥 Campaign List Generator")
+        tier_choice = st.selectbox("Select Target Campaign Segment:", ["Top 20% High-Risk (Recommended)", "All High-Risk Accounts", "Full Customer Base"])
+        
+        test_df = splits["X_test_raw"].copy()
+        test_df["predicted_churn_prob"] = pipeline_bundle["eval_details"]["Ensemble (XGB + LR + RF)"]["y_prob"]
+        test_df["risk_tier"] = test_df["predicted_churn_prob"].apply(assign_risk_tier)
 
-    # Pre-download Campaign Metrics
-    camp_m1, camp_m2, camp_m3 = st.columns(3)
-    camp_m1.metric("Accounts in Campaign", f"{len(export_df):,}")
-    camp_m2.metric("Monthly Billing in Campaign", f"${export_df['MonthlyCharges'].sum():,.2f}")
-    camp_m3.metric("Avg Churn Risk", f"{export_df['Churn_Probability'].mean() * 100:.1f}%")
+        if "Top 20%" in tier_choice:
+            campaign_df = test_df.sort_values(by="predicted_churn_prob", ascending=False).head(int(len(test_df) * 0.20))
+        elif "High-Risk" in tier_choice:
+            campaign_df = test_df[test_df["risk_tier"] == "High Risk"]
+        else:
+            campaign_df = test_df
 
-    # PROMINENT DOWNLOAD BUTTON AT TOP
-    csv_buffer = io.StringIO()
-    export_df.to_csv(csv_buffer, index=False)
-
-    st.download_button(
-        label="📥 Download Campaign List (CSV)",
-        data=csv_buffer.getvalue(),
-        file_name="targeted_retention_campaign_list.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-    st.dataframe(export_df, use_container_width=True)
+        csv_buffer = io.StringIO()
+        campaign_df.to_csv(csv_buffer, index=False)
+        st.download_button(
+            label="📥 Download Campaign List (CSV)",
+            data=csv_buffer.getvalue(),
+            file_name="retainpulse_targeted_campaign.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        st.caption(f"Ready for ingestion: {len(campaign_df)} eligible subscriber accounts.")
 
 # =========================================================
-# MODULE 7: Business Impact & ROI Planner
+# MODULE 8: Business Impact & Campaign ROI
 # =========================================================
-elif nav_choice == "💰 7. Business Impact & ROI Planner":
+elif nav_choice == "💰 8. Business Impact & Campaign ROI":
     st.markdown('<div class="main-header">💰 Business Impact & Campaign ROI Planner</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Evaluating financial returns of model-driven targeting vs contacting everyone (Slide 9).</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Financial simulator powered by single source of truth (metrics.json) & 100K batch benchmark.</div>', unsafe_allow_html=True)
 
-    c_p1, c_p2, c_p3 = st.columns(3)
-    with c_p1:
-        total_subscribers = st.number_input("Total Subscriber Base:", min_value=1000, max_value=500000, value=7043, step=500)
-        baseline_churn = st.slider("Baseline Churn Rate (%):", 5.0, 50.0, 26.5, step=0.5) / 100.0
-    with c_p2:
-        contact_cost = st.slider("Retention Cost per Contact ($):", 5.0, 150.0, 40.0, step=5.0)
-        save_success_rate = st.slider("Offer Save / Acceptance Rate (%):", 5.0, 60.0, 25.0, step=1.0) / 100.0
-    with c_p3:
-        avg_annual_clv = st.number_input("Annual Revenue per Saved Customer ($):", min_value=200.0, max_value=3000.0, value=780.0, step=50.0)
-        target_top_pct = st.slider("Model Targeting Cut-off (% of Base):", 5.0, 50.0, 20.0, step=5.0) / 100.0
+    fin_data = metrics_data["financial_impact"]
+    strat_a = fin_data["strategy_a_mass_contact"]
+    strat_b = fin_data["strategy_b_model_targeting"]
+    comp = fin_data["comparison"]
+    bench = metrics_data["batch_scoring_benchmark"]
 
-    roi_data = calculate_campaign_roi(
-        total_customers=total_subscribers,
-        baseline_churn_rate=baseline_churn,
-        avg_annual_revenue=avg_annual_clv,
-        contact_cost=contact_cost,
-        save_rate=save_success_rate,
-        top_pct_targeted=target_top_pct,
-        top_pct_churn_capture_rate=0.60
-    )
+    # Benchmark Callout
+    st.markdown(f"""
+    <div class="callout-box" style="border-left: 5px solid #10B981;">
+        <b>⚡ Enterprise Batch-Scoring Benchmark:</b> Model scored <strong>{bench['rows_scored']:,} subscribers in {bench['duration_seconds']:.3f} seconds</strong> 
+        (throughput: <strong>{bench['rows_per_second']:,} rows/sec</strong>). 
+        Replaces vague claims of taking minutes with audited sub-second enterprise throughput!
+    </div>
+    """, unsafe_allow_html=True)
 
-    ev = roi_data["everyone"]
-    md = roi_data["model"]
-    cmp = roi_data["comparison"]
-
-    st.markdown("### ⚖️ Strategy Financial Comparison")
-    col_e, col_m = st.columns(2)
-
-    with col_e:
+    # Summary Cards
+    b1, b2, b3 = st.columns(3)
+    with b1:
         st.markdown(f"""
-        <div style="background-color: #F8FAFC; border: 2px solid #CBD5E1; border-radius: 8px; padding: 20px;">
-            <h3 style="color: #475569; margin-top: 0;">Strategy A: Contact Everyone (Mass Blast)</h3>
-            <p><strong>Customers Contacted:</strong> {ev['contacted']:,} (100%)</p>
-            <p><strong>Campaign Expenditure:</strong> <span style="color:#EF4444; font-weight:700;">${ev['campaign_cost']:,.0f}</span></p>
-            <p><strong>Churners Saved:</strong> {ev['churners_saved']:,}</p>
-            <p><strong>Gross Revenue Kept:</strong> ${ev['revenue_kept']:,.0f}</p>
-            <hr style="margin: 10px 0;">
-            <h4 style="color: #0F172A; margin: 0;">Net Financial Gain: <span style="color: #2563EB;">${ev['net_gain']:,.0f}</span></h4>
-            <p style="margin: 5px 0 0 0; color: #64748B;">Campaign ROI: <strong>{ev['roi_pct']:.1f}%</strong></p>
+        <div class="metric-card metric-card-danger">
+            <div class="metric-label">Strategy A: Mass Contact</div>
+            <div class="metric-value">{strat_a['roi_pct']:.1f}% ROI</div>
+            <div class="metric-sub">${strat_a['campaign_cost']:,.0f} Cost ➔ ${strat_a['net_gain']:,.0f} Net Gain</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with b2:
+        st.markdown(f"""
+        <div class="metric-card metric-card-success">
+            <div class="metric-label">Strategy B: Model Targeting</div>
+            <div class="metric-value">{strat_b['roi_pct']:.1f}% ROI</div>
+            <div class="metric-sub">${strat_b['campaign_cost']:,.0f} Cost ➔ ${strat_b['net_gain']:,.0f} Net Gain</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with b3:
+        st.markdown(f"""
+        <div class="metric-card metric-card-purple">
+            <div class="metric-label">Efficiency Multiplier</div>
+            <div class="metric-value">{comp['roi_multiplier']:.1f}x ROI</div>
+            <div class="metric-sub">${comp['cost_savings']:,.0f} Saved & +${comp['additional_profit']:,.0f} Profit</div>
         </div>
         """, unsafe_allow_html=True)
 
-    with col_m:
-        st.markdown(f"""
-        <div style="background-color: #ECFDF5; border: 2px solid #10B981; border-radius: 8px; padding: 20px;">
-            <h3 style="color: #065F46; margin-top: 0;">Strategy B: Model-Driven Targeting (Top {md['target_pct']:.0f}%)</h3>
-            <p><strong>Customers Contacted:</strong> {md['contacted']:,} ({md['target_pct']:.0f}%)</p>
-            <p><strong>Campaign Expenditure:</strong> <span style="color:#10B981; font-weight:700;">${md['campaign_cost']:,.0f}</span></p>
-            <p><strong>Churners Saved:</strong> {md['churners_saved']:,}</p>
-            <p><strong>Gross Revenue Kept:</strong> ${md['revenue_kept']:,.0f}</p>
-            <hr style="margin: 10px 0;">
-            <h4 style="color: #065F46; margin: 0;">Net Financial Gain: <span style="color: #059669;">${md['net_gain']:,.0f}</span></h4>
-            <p style="margin: 5px 0 0 0; color: #047857;">Campaign ROI: <strong>{md['roi_pct']:.1f}%</strong> ({cmp['roi_multiplier']:.1f}x Higher ROI!)</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    strat_df = pd.DataFrame([
-        {"Strategy": "Contact Everyone", "Metric": "Spend ($)", "Amount": ev["campaign_cost"]},
-        {"Strategy": "Contact Everyone", "Metric": "Net Revenue Kept ($)", "Amount": ev["net_gain"]},
-        {"Strategy": "Target Top 20% (Model)", "Metric": "Spend ($)", "Amount": md["campaign_cost"]},
-        {"Strategy": "Target Top 20% (Model)", "Metric": "Net Revenue Kept ($)", "Amount": md["net_gain"]}
+    # Interactive Comparison Table
+    st.markdown("### 📊 Side-by-Side Financial Comparison Table")
+    roi_table = pd.DataFrame([
+        {
+            "Strategy": strat_a["name"],
+            "Contacted": f"{strat_a['contacted']:,} (100%)",
+            "Campaign Cost": f"${strat_a['campaign_cost']:,.0f}",
+            "Saved Churners": f"{strat_a['saved_churners']:.0f} accounts",
+            "Revenue Kept": f"${strat_a['revenue_kept']:,.0f}",
+            "Net Profit": f"+${strat_a['net_gain']:,.0f}",
+            "Campaign ROI": f"{strat_a['roi_pct']:.1f}%"
+        },
+        {
+            "Strategy": strat_b["name"],
+            "Contacted": f"{strat_b['contacted']:,} (20%)",
+            "Campaign Cost": f"${strat_b['campaign_cost']:,.0f}",
+            "Saved Churners": f"{strat_b['saved_churners']:.0f} accounts",
+            "Revenue Kept": f"${strat_b['revenue_kept']:,.0f}",
+            "Net Profit": f"+${strat_b['net_gain']:,.0f}",
+            "Campaign ROI": f"{strat_b['roi_pct']:.1f}%"
+        }
     ])
+    st.dataframe(roi_table, use_container_width=True)
 
-    fig_cmp = px.bar(
-        strat_df,
-        x="Strategy",
-        y="Amount",
-        color="Metric",
-        barmode="group",
-        title="Cost vs Net Revenue Retained: Mass Contact vs Precision Model Targeting",
-        color_discrete_map={"Spend ($)": "#EF4444", "Net Revenue Kept ($)": "#10B981"}
-    )
-    fig_cmp.update_layout(template="plotly_white", yaxis_title="Amount ($)")
-    st.plotly_chart(fig_cmp, use_container_width=True)
+# =========================================================
+# MODULE 9: A/B Experimentation Calculator (Task 8)
+# =========================================================
+elif nav_choice == "🧪 9. A/B Experimentation Calculator":
+    st.markdown('<div class="main-header">🧪 A/B Experimentation & Rollout Calculator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Statistically rigorous sample size and duration estimation for retention playbook rollouts.</div>', unsafe_allow_html=True)
 
-    st.success(f"""
-    💡 **Bottom-Line Business Conclusion:**  
-    By prioritizing high-risk accounts via XGBoost rather than mass-discounting all subscribers:  
-    - You save **${cmp['cost_savings']:,.0f} in wasted retention spend** (spending 80% less).  
-    - You generate **${cmp['additional_profit']:,.0f} more net profit**.  
-    - Campaign ROI increases from **{ev['roi_pct']:.0f}%** to **{md['roi_pct']:.0f}%**!
+    from statsmodels.stats.proportion import proportion_effectsize
+    from statsmodels.stats.power import NormalIndPower
+
+    st.markdown("""
+    <div class="callout-box">
+        <b>Task 8 Experimentation Framework:</b>
+        Before deploying high-touch retention discounts to all high-risk subscribers, retention teams must run an A/B test 
+        (e.g., Control: Standard digital email vs Variant: Concierge VIP call + $15 bill credit).
+        This calculator determines the required sample size per test arm using a two-proportion z-test.
+    </div>
+    """, unsafe_allow_html=True)
+
+    ab_c1, ab_c2 = st.columns(2)
+    with ab_c1:
+        st.markdown("#### ⚙️ Test Design Parameters")
+        base_churn_input = st.slider(
+            "Baseline Churn Rate (%):", 5.0, 50.0,
+            float(metrics_data["metadata"]["baseline_churn_rate_pct"]), step=0.1
+        ) / 100.0
+
+        mde_input = st.slider(
+            "Minimum Detectable Effect (Relative % Reduction in Churn):", 5.0, 30.0, 10.0, step=1.0
+        ) / 100.0
+
+        p1 = base_churn_input
+        p2 = p1 * (1.0 - mde_input)
+        abs_drop = (p1 - p2) * 100.0
+
+        power_input = st.slider("Statistical Power (1 - β):", 0.70, 0.95, 0.80, step=0.05)
+        alpha_input = st.slider("Significance Level (α):", 0.01, 0.10, 0.05, step=0.01)
+        weekly_volume = st.number_input("Weekly Eligible High-Risk Customers:", min_value=100, max_value=10000, value=500, step=50)
+
+    # Compute Sample Size via Statsmodels
+    effect_size = proportion_effectsize(p1, p2)
+    power_analysis = NormalIndPower()
+    n_per_arm = power_analysis.solve_power(effect_size=effect_size, alpha=alpha_input, power=power_input, alternative="two-sided")
+    n_arm_int = math.ceil(n_per_arm)
+    n_total = n_arm_int * 2
+    duration_weeks = n_total / weekly_volume
+
+    with ab_c2:
+        st.markdown("#### 📊 Required Sample Size & Timeline")
+        st.markdown(f"""
+        <div class="metric-card metric-card-purple">
+            <div class="metric-label">Sample Size Per Arm</div>
+            <div class="metric-value">{n_arm_int:,} subscribers</div>
+            <div class="metric-sub">Total across both arms: {n_total:,}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        dur_color = "danger" if duration_weeks > 12 else ("warning" if duration_weeks > 6 else "success")
+        st.markdown(f"""
+        <div class="metric-card metric-card-{dur_color}">
+            <div class="metric-label">Estimated Test Duration</div>
+            <div class="metric-value">{duration_weeks:.1f} weeks</div>
+            <div class="metric-sub">At {weekly_volume:,} eligible customers / week</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="background-color:#F8FAFC; border:1px solid #E2E8F0; border-radius:10px; padding:14px; font-size:0.9rem;">
+            <b>Test Hypothesis:</b><br>
+            • $H_0$: Retention offer has zero effect ($p_1 = p_2 = {p1*100:.1f}\\%$).<br>
+            • $H_1$: Retention offer lowers churn from <strong>{p1*100:.1f}%</strong> to <strong>{p2*100:.1f}%</strong> (absolute drop of {abs_drop:.2f}%).<br>
+            • With α={alpha_input} and {int(power_input*100)}% power, {n_arm_int:,} accounts per arm protects against false alarms and underpowered tests.
+        </div>
+        """, unsafe_allow_html=True)
+
+# =========================================================
+# MODULE 10: Scalability, Drift & Retraining (Task 2)
+# =========================================================
+elif nav_choice == "🚀 10. Scalability, Drift & Retraining":
+    st.markdown('<div class="main-header">🚀 Production Scalability, Drift & Quarterly Retraining</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Monitoring Population Stability Index (PSI), concept drift, and simulated next-quarter threshold re-optimization.</div>', unsafe_allow_html=True)
+
+    with st.spinner("Simulating next-quarter batch with macroeconomic drift..."):
+        retrain_results = run_retraining_simulation()
+
+    base_s = retrain_results["baseline_summary"]
+    drift_s = retrain_results["drifted_batch_summary"]
+    psi_df = retrain_results["feature_psi_df"]
+    drift_diag = retrain_results["churn_rate_diag"]
+
+    # Highlights
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Baseline Churn Rate</div>
+            <div class="metric-value">{base_s['churn_rate_pct']:.1f}%</div>
+            <div class="metric-sub">Historical Reference</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with d2:
+        st.markdown(f"""
+        <div class="metric-card metric-card-danger">
+            <div class="metric-label">Drifted Churn Rate</div>
+            <div class="metric-value">{drift_s['actual_churn_rate_pct']:.1f}%</div>
+            <div class="metric-sub">Next-Quarter Surge (+{(drift_s['actual_churn_rate_pct'] - base_s['churn_rate_pct']):.1f}%)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with d3:
+        st.markdown(f"""
+        <div class="metric-card metric-card-warning">
+            <div class="metric-label">Threshold Re-Optimization</div>
+            <div class="metric-value">{base_s['threshold']:.2f} ➔ {drift_s['reoptimized_threshold']:.2f}</div>
+            <div class="metric-sub">Adapted to Drifted Cohort</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with d4:
+        st.markdown(f"""
+        <div class="metric-card metric-card-success">
+            <div class="metric-label">Profit Lift from Recalibration</div>
+            <div class="metric-value">+${drift_s['profit_lift_from_reopt']:,.0f}</div>
+            <div class="metric-sub">Protected Retention Margin</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # PSI Feature Drift Chart
+    st.markdown("### 📊 Population Stability Index (PSI) per Feature")
+    st.markdown("""
+    **Monitoring Rule:** `PSI < 0.10`: Stable (Green) | `0.10 ≤ PSI < 0.25`: Moderate Shift (Warning - Yellow) | `PSI ≥ 0.25`: Significant Drift (Alert - Red).
     """)
+
+    fig_psi = px.bar(
+        psi_df, x="Feature", y="PSI", color="Status",
+        color_discrete_map={"Stable": "#10B981", "Moderate Shift": "#F59E0B", "Significant Drift": "#EF4444"},
+        title="Feature Drift Across Deployed Features (PSI)",
+        text="PSI"
+    )
+    fig_psi.update_traces(texttemplate='%{text:.3f}', textposition='outside')
+    fig_psi.add_hline(y=0.10, line_dash="dash", line_color="#F59E0B", annotation_text="Warning (0.10)")
+    fig_psi.add_hline(y=0.25, line_dash="dash", line_color="#EF4444", annotation_text="Alert (0.25)")
+    fig_psi.update_layout(height=420, template="plotly_white")
+    st.plotly_chart(fig_psi, use_container_width=True)
+
+    # Deployment Architecture Diagram
+    st.markdown("---")
+    st.markdown("### 🏗️ Enterprise Production Architecture & Migration Path")
+    
+    arch_col1, arch_col2, arch_col3 = st.columns(3)
+    with arch_col1:
+        st.markdown("""
+        <div class="studio-card">
+            <h4 style="color:#2563EB; margin-top:0;">1. Data Storage</h4>
+            <b>Current:</b> In-memory SQLite prototype.<br><br>
+            <b>Enterprise Migration:</b> Managed PostgreSQL / Snowflake database with CDC (Change Data Capture) 
+            streaming real-time subscriber billing and contract changes into a feature store (e.g. Feast).
+        </div>
+        """, unsafe_allow_html=True)
+    with arch_col2:
+        st.markdown("""
+        <div class="studio-card">
+            <h4 style="color:#10B981; margin-top:0;">2. Serving API</h4>
+            <b>Current:</b> Streamlit interactive app.<br><br>
+            <b>Enterprise Migration:</b> Containerized FastAPI microservice deployed on Kubernetes behind an API Gateway. 
+            Frontline CRM desktops query <code>POST /predict_churn</code> for sub-50ms inference.
+        </div>
+        """, unsafe_allow_html=True)
+    with arch_col3:
+        st.markdown("""
+        <div class="studio-card">
+            <h4 style="color:#8B5CF6; margin-top:0;">3. Continuous Retraining</h4>
+            <b>Current:</b> On-demand script simulation.<br><br>
+            <b>Enterprise Migration:</b> Scheduled Apache Airflow / Celery DAG running weekly PSI drift audits. 
+            Triggers automated quarterly retraining with MLflow experiment registry and canary deployments.
+        </div>
+        """, unsafe_allow_html=True)

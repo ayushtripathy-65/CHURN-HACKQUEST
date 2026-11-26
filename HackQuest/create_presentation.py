@@ -5,6 +5,7 @@ for DataNova 2026 Problem Statement DN-BU-01 based on the updated project.
 """
 
 import os
+import json
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -16,6 +17,39 @@ def create_deck():
     # 16:9 Widescreen dimensions
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
+
+    # Load unified metrics from single source of truth (metrics.json)
+    metrics_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts", "metrics.json")
+    if not os.path.exists(metrics_path):
+        metrics_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "artifacts", "metrics.json")
+    metrics = {}
+    if os.path.exists(metrics_path):
+        with open(metrics_path, "r") as f:
+            metrics = json.load(f)
+
+    # Unified metric parameters
+    top20_capture = metrics.get("gains_and_lift", {}).get("top_20_capture_rate_pct", 51.07)
+    top20_lift = metrics.get("gains_and_lift", {}).get("top_20_lift", 2.55)
+    top10_capture = metrics.get("gains_and_lift", {}).get("top_10_capture_rate_pct", 28.61)
+    top10_lift = metrics.get("gains_and_lift", {}).get("top_10_lift", 2.86)
+    
+    strat_a = metrics.get("financial_impact", {}).get("strategy_a_mass_contact", {})
+    strat_b = metrics.get("financial_impact", {}).get("strategy_b_model_targeting", {})
+    comp = metrics.get("financial_impact", {}).get("comparison", {})
+    
+    saved_everyone = strat_a.get("saved_churners", 467.2)
+    rev_everyone = strat_a.get("revenue_kept", 364455.0)
+    net_everyone = strat_a.get("net_gain", 82735.0)
+    roi_everyone = strat_a.get("roi_pct", 29.37)
+    
+    cost_model = strat_b.get("campaign_cost", 56344.0)
+    saved_model = strat_b.get("saved_churners", 238.6)
+    rev_model = strat_b.get("revenue_kept", 186125.41)
+    net_model = strat_b.get("net_gain", 129781.41)
+    roi_model = strat_b.get("roi_pct", 230.34)
+    
+    cost_savings = comp.get("cost_savings", 225376.0)
+    roi_mult = comp.get("roi_multiplier", 7.84)
 
     # Theme Colors
     COLOR_PRIMARY = RGBColor(15, 23, 42)      # Slate 900
@@ -182,10 +216,10 @@ def create_deck():
 
     goals_data = [
         ("Catch At-Risk Subscribers", "Recall, Precision, PR-AUC, ROC-AUC", "Tuned Soft Voting Ensemble & class weighting to maximize churn capture."),
-        ("Rank Limited-Budget Campaign", "Decile Lift & Cumulative Gains (Top 20%)", "Concentrate 80% of retention budget where over 52% of churners reside."),
+        ("Rank Limited-Budget Campaign", "Decile Lift & Cumulative Gains (Top 20%)", f"Concentrate 80% of retention budget where over {top20_capture:.1f}% of churners reside ({top20_lift:.2f}x Lift)."),
         ("Explain Every Prediction", "Global & Individual SHAP Attributions", "SHAP TreeExplainer JavaScript Force Plots + Plotly feature waterfalls."),
         ("Turn Insights into Action", "2x2 Risk-Value Matrix & Playbook", "Differentiating high-touch VIP saves from automated digital nudges."),
-        ("Prove Business ROI", "Net Revenue Retained & Campaign ROI %", "Interactive financial simulator validating +$162K net gain vs mass contact.")
+        ("Prove Business ROI", "Net Revenue Retained & Campaign ROI %", f"Interactive financial simulator validating +${net_model:,.0f} net gain ({roi_model:.1f}% ROI).")
     ]
 
     for i, row in enumerate(goals_data):
@@ -413,8 +447,8 @@ def create_deck():
     p.space_after = Pt(4)
 
     pts6_r = [
-        "Top 10% Risk Decile: 78.0% churn rate, delivering a 2.94x Lift.",
-        "Top 20% Risk Decile: Captures >52.1% of all churners (2.61x Lift over random).",
+        f"Top 10% Risk Decile: Captures {top10_capture:.1f}% of all churners ({top10_lift:.2f}x Lift over random).",
+        f"Top 20% Risk Decile: Captures {top20_capture:.1f}% of all churners ({top20_lift:.2f}x Lift over random).",
         "Validation: Contacting just the top 2 quintiles catches majority of churners at 20% of the contact budget."
     ]
     for pt in pts6_r:
@@ -548,8 +582,8 @@ def create_deck():
             p.font.color.rgb = COLOR_WHITE
 
     roi_rows = [
-        ("Strategy A: Contact Everyone (Mass Blast)", "7,043 (100%)", "$281,720", "467 accounts", "$364,260", "+$82,540", "29.3% ROI"),
-        ("Strategy B: Target Top 20% (Model-Driven)", "1,409 (20%)", "$56,360", "280 accounts", "$218,556", "+$162,196", "287.8% ROI (10x!)")
+        ("Strategy A: Contact Everyone (Mass Blast)", "7,043 (100%)", "$281,720", f"{int(saved_everyone)} accounts", f"${rev_everyone:,.0f}", f"+${net_everyone:,.0f}", f"{roi_everyone:.1f}% ROI"),
+        ("Strategy B: Target Top 20% (Model-Driven)", "1,408 (20%)", f"${cost_model:,.0f}", f"{int(saved_model)} accounts", f"${rev_model:,.0f}", f"+${net_model:,.0f}", f"{roi_model:.1f}% ROI ({roi_mult:.1f}x Multiplier)")
     ]
     for i, row in enumerate(roi_rows):
         for j, val in enumerate(row):
@@ -575,10 +609,10 @@ def create_deck():
     p.space_after = Pt(6)
 
     pts9 = [
-        "Assumptions: Baseline 26.5% churn, $40 contact cost, 25% offer save rate, $780 annual CLV (12 × $65/mo).",
-        "Wasted Spend Eliminated: Target Top 20% saves $225,360 in wasted discount spend (spending 80% less).",
-        "Higher Net Profit: Delivers +$162,196 in net profit—nearly DOUBLE the net gain of contacting everyone.",
-        "10x Campaign ROI Multiplier: ROI jumps from 29.3% (mass spray-and-pray) to 287.8% (precision ML targeting).",
+        f"Assumptions: Baseline 26.5% churn, $40 contact cost, 25% offer save rate, $780 annual CLV (12 × $65/mo).",
+        f"Wasted Spend Eliminated: Target Top 20% saves ${cost_savings:,.0f} in wasted discount spend (spending 80% less).",
+        f"Higher Net Profit: Delivers +${net_model:,.0f} in net profit (+57% higher net gain than contacting everyone).",
+        f"{roi_mult:.1f}x Campaign ROI Multiplier: ROI jumps from {roi_everyone:.1f}% (mass spray-and-pray) to {roi_model:.1f}% (precision ML targeting).",
         "Operational Feasibility: Batch scoring 100K+ subscribers takes minutes. Model retrained quarterly to monitor drift."
     ]
     for pt in pts9:

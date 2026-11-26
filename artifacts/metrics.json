@@ -1,0 +1,346 @@
+{
+  "metadata": {
+    "version": "2.1.0",
+    "seed": 42,
+    "dataset_rows": 7043,
+    "dataset_churners": 1869,
+    "baseline_churn_rate_pct": 26.54,
+    "test_set_size": 1409,
+    "test_set_churners": 374,
+    "primary_model": "Ensemble (XGB + LR + RF)",
+    "operating_threshold": 0.35
+  },
+  "performance": {
+    "roc_auc": 0.8496,
+    "pr_auc": 0.6652,
+    "recall": 0.8797,
+    "precision": 0.466,
+    "f1": 0.6093,
+    "accuracy": 0.7005,
+    "confusion_matrix": {
+      "tn": 658,
+      "fp": 377,
+      "fn": 45,
+      "tp": 329
+    },
+    "caught_churners_test": 329,
+    "total_churners_test": 374
+  },
+  "confidence_intervals_95": {
+    "recall": {
+      "mean": 0.879812708041831,
+      "lower_95": 0.8467434452340112,
+      "upper_95": 0.9120397753087439,
+      "display": "88.0% [84.7\u201391.2%]"
+    },
+    "precision": {
+      "mean": 0.4654293212813135,
+      "lower_95": 0.43016343768422705,
+      "upper_95": 0.5035080670242201,
+      "display": "46.5% [43.0\u201350.4%]"
+    },
+    "roc_auc": {
+      "mean": 0.8498686779901362,
+      "lower_95": 0.829103708574618,
+      "upper_95": 0.8703139464866566,
+      "display": "0.850 [0.829\u20130.870]"
+    },
+    "pr_auc": {
+      "mean": 0.666400451947464,
+      "lower_95": 0.6161907769422684,
+      "upper_95": 0.7131509573883476,
+      "display": "0.666 [0.616\u20130.713]"
+    },
+    "top_20_capture": {
+      "mean": 0.5096130107891719,
+      "lower_95": 0.4702706476330898,
+      "upper_95": 0.5486579226285108,
+      "display": "51.0% [47.0\u201354.9%]"
+    }
+  },
+  "gains_and_lift": {
+    "top_10_capture_rate_pct": 28.61,
+    "top_10_lift": 2.86,
+    "top_20_capture_rate_pct": 51.07,
+    "top_20_lift": 2.55,
+    "deciles": [
+      {
+        "decile": "Decile 1",
+        "customers": 141,
+        "churners": 107,
+        "cum_customers": 141,
+        "cum_churners": 107,
+        "pct_customers": 10.01,
+        "cum_gains_pct": 28.61,
+        "churn_rate_pct": 75.89,
+        "lift": 2.86
+      },
+      {
+        "decile": "Decile 2",
+        "customers": 141,
+        "churners": 84,
+        "cum_customers": 282,
+        "cum_churners": 191,
+        "pct_customers": 20.01,
+        "cum_gains_pct": 51.07,
+        "churn_rate_pct": 59.57,
+        "lift": 2.55
+      },
+      {
+        "decile": "Decile 3",
+        "customers": 141,
+        "churners": 57,
+        "cum_customers": 423,
+        "cum_churners": 248,
+        "pct_customers": 30.02,
+        "cum_gains_pct": 66.31,
+        "churn_rate_pct": 40.43,
+        "lift": 2.21
+      },
+      {
+        "decile": "Decile 4",
+        "customers": 141,
+        "churners": 48,
+        "cum_customers": 564,
+        "cum_churners": 296,
+        "pct_customers": 40.03,
+        "cum_gains_pct": 79.14,
+        "churn_rate_pct": 34.04,
+        "lift": 1.98
+      },
+      {
+        "decile": "Decile 5",
+        "customers": 141,
+        "churners": 33,
+        "cum_customers": 705,
+        "cum_churners": 329,
+        "pct_customers": 50.04,
+        "cum_gains_pct": 87.97,
+        "churn_rate_pct": 23.4,
+        "lift": 1.76
+      },
+      {
+        "decile": "Decile 6",
+        "customers": 140,
+        "churners": 23,
+        "cum_customers": 845,
+        "cum_churners": 352,
+        "pct_customers": 59.97,
+        "cum_gains_pct": 94.12,
+        "churn_rate_pct": 16.43,
+        "lift": 1.57
+      },
+      {
+        "decile": "Decile 7",
+        "customers": 141,
+        "churners": 13,
+        "cum_customers": 986,
+        "cum_churners": 365,
+        "pct_customers": 69.98,
+        "cum_gains_pct": 97.59,
+        "churn_rate_pct": 9.22,
+        "lift": 1.39
+      },
+      {
+        "decile": "Decile 8",
+        "customers": 141,
+        "churners": 6,
+        "cum_customers": 1127,
+        "cum_churners": 371,
+        "pct_customers": 79.99,
+        "cum_gains_pct": 99.2,
+        "churn_rate_pct": 4.26,
+        "lift": 1.24
+      },
+      {
+        "decile": "Decile 9",
+        "customers": 141,
+        "churners": 1,
+        "cum_customers": 1268,
+        "cum_churners": 372,
+        "pct_customers": 89.99,
+        "cum_gains_pct": 99.47,
+        "churn_rate_pct": 0.71,
+        "lift": 1.11
+      },
+      {
+        "decile": "Decile 10",
+        "customers": 141,
+        "churners": 2,
+        "cum_customers": 1409,
+        "cum_churners": 374,
+        "pct_customers": 100.0,
+        "cum_gains_pct": 100.0,
+        "churn_rate_pct": 1.42,
+        "lift": 1.0
+      }
+    ]
+  },
+  "probability_calibration": {
+    "best_method": "isotonic",
+    "brier_uncalibrated": 0.1568,
+    "brier_calibrated": 0.1344,
+    "logloss_uncalibrated": 0.4689,
+    "logloss_calibrated": 0.412,
+    "brier_reduction_pct": 14.28
+  },
+  "cost_matrix_analysis": {
+    "fp_cost": 40.0,
+    "fn_cost": 780.0,
+    "save_rate": 0.25,
+    "optimal_threshold": 0.2,
+    "max_net_profit_test": 36260.0,
+    "theoretical_bayes_threshold": 0.205
+  },
+  "survival_analysis": {
+    "Month-to-month": {
+      "median_survival_time": "35 months",
+      "total_customers": 3875,
+      "churners": 1655
+    },
+    "One year": {
+      "median_survival_time": "Not reached (>72m)",
+      "total_customers": 1473,
+      "churners": 166
+    },
+    "Two year": {
+      "median_survival_time": "Not reached (>72m)",
+      "total_customers": 1695,
+      "churners": 48
+    }
+  },
+  "permutation_importance": {
+    "top_10_features": [
+      {
+        "Feature": "contract_numeric",
+        "Importance_Mean": 0.045945893764175814,
+        "Importance_Std": 0.005743918829071419
+      },
+      {
+        "Feature": "log_tenure",
+        "Importance_Mean": 0.0386159948492021,
+        "Importance_Std": 0.005615595519431767
+      },
+      {
+        "Feature": "monthly_to_total_ratio",
+        "Importance_Mean": 0.022608118434733614,
+        "Importance_Std": 0.004988999268778331
+      },
+      {
+        "Feature": "charge_ratio_internet",
+        "Importance_Mean": 0.011154233818084081,
+        "Importance_Std": 0.0022607501133362624
+      },
+      {
+        "Feature": "tenure_contract_interaction",
+        "Importance_Mean": 0.008113682925006716,
+        "Importance_Std": 0.003114427089437867
+      },
+      {
+        "Feature": "Contract_Month-to-month",
+        "Importance_Mean": 0.008086333442968297,
+        "Importance_Std": 0.0029666839285205256
+      },
+      {
+        "Feature": "tenure",
+        "Importance_Mean": 0.0067030303993907085,
+        "Importance_Std": 0.002467361548869413
+      },
+      {
+        "Feature": "TotalCharges",
+        "Importance_Mean": 0.006276806398124435,
+        "Importance_Std": 0.002234888915807893
+      },
+      {
+        "Feature": "charge_vs_internet_mean",
+        "Importance_Mean": 0.005791389079698517,
+        "Importance_Std": 0.0011570639128137348
+      },
+      {
+        "Feature": "charge_discrepancy",
+        "Importance_Mean": 0.005094709216156767,
+        "Importance_Std": 0.001421580129952752
+      }
+    ],
+    "spearman_rank_correlation_with_shap": 0.5418,
+    "spearman_p_value": 1.5300272174312138e-06
+  },
+  "batch_scoring_benchmark": {
+    "rows_scored": 100000,
+    "duration_seconds": 0.479,
+    "rows_per_second": 208887
+  },
+  "financial_impact": {
+    "assumptions": {
+      "contact_cost": 40.0,
+      "save_rate": 0.25,
+      "annual_clv": 780.0,
+      "target_top_pct": 20.0
+    },
+    "strategy_a_mass_contact": {
+      "name": "Strategy A: Contact Everyone (Mass Campaign)",
+      "contacted": 7043,
+      "contacted_pct": 100.0,
+      "campaign_cost": 281720.0,
+      "saved_churners": 467.2,
+      "revenue_kept": 364455.0,
+      "net_gain": 82735.0,
+      "roi_pct": 29.37
+    },
+    "strategy_b_model_targeting": {
+      "name": "Strategy B: Target Top 20% (Model-Driven)",
+      "contacted": 1408,
+      "contacted_pct": 20.0,
+      "campaign_cost": 56344.00000000001,
+      "churn_capture_rate_pct": 51.07,
+      "churners_targeted": 954.5,
+      "saved_churners": 238.6,
+      "revenue_kept": 186125.41,
+      "net_gain": 129781.41,
+      "roi_pct": 230.34
+    },
+    "comparison": {
+      "cost_savings": 225376.0,
+      "additional_profit": 47046.41,
+      "roi_multiplier": 7.84
+    }
+  },
+  "model_leaderboard": [
+    {
+      "model": "Ensemble (XGB + LR + RF)",
+      "accuracy": 0.7005,
+      "precision": 0.466,
+      "recall": 0.8797,
+      "f1": 0.6093,
+      "roc_auc": 0.8496,
+      "pr_auc": 0.6652
+    },
+    {
+      "model": "Logistic Regression",
+      "accuracy": 0.6891,
+      "precision": 0.4564,
+      "recall": 0.8957,
+      "f1": 0.6047,
+      "roc_auc": 0.8489,
+      "pr_auc": 0.6651
+    },
+    {
+      "model": "XGBoost (Tuned)",
+      "accuracy": 0.7019,
+      "precision": 0.4675,
+      "recall": 0.885,
+      "f1": 0.6118,
+      "roc_auc": 0.8482,
+      "pr_auc": 0.6607
+    },
+    {
+      "model": "Random Forest",
+      "accuracy": 0.7182,
+      "precision": 0.4826,
+      "recall": 0.8529,
+      "f1": 0.6164,
+      "roc_auc": 0.8442,
+      "pr_auc": 0.654
+    }
+  ]
+}
